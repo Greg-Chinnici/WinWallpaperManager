@@ -1,0 +1,20 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <!--
+    Per-user MSI for WinWallpaper. Build through build/publish.ps1 -Msi, which publishes the
+    app first and passes PublishDir/Version here:
+      dotnet build installer/WinWallpaper.wixproj -c Release -p:Version=0.1.0 -p:PublishDir=<app folder>
+  -->
+  <PropertyGroup>
+    <Version Condition="'$(Version)' == ''">0.1.0</Version>
+    <PublishDir Condition="'$(PublishDir)' == ''">$(MSBuildThisFileDirectory)../artifacts/publish/WinWallpaper</PublishDir>
+    <OutputName>WinWallpaper-$(Version)-x64</OutputName>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputPath>$(MSBuildThisFileDirectory)../artifacts/installer/</OutputPath>
+    <DefineConstants>PublishDir=$(PublishDir);Version=$(Version);AssetsDir=$(MSBuildThisFileDirectory)../assets</DefineConstants>
+    <!-- Per-user files under %LOCALAPPDATA% trip these ICEs even though the package is valid. -->
+    <SuppressIces>ICE38;ICE64;ICE91</SuppressIces>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+  </ItemGroup>
+</Project>

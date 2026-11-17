@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsAotCompatible>true</IsAotCompatible>
+    <Description>Wire protocol shared by WallpaperHost, WallpaperDaemon, WallpaperTray and external renderers.</Description>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,19 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/ClockRenderer/ClockRenderer.csproj" />
+    <Project Path="samples/ExternalRenderer/ExternalRenderer.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/WallpaperDaemon/WallpaperDaemon.csproj" />
+    <Project Path="src/WallpaperHost/WallpaperHost.csproj" />
+    <Project Path="src/WallpaperProtocol/WallpaperProtocol.csproj" />
+    <Project Path="src/WallpaperTray/WallpaperTray.csproj" />
+  </Folder>
+  <Folder Name="/tests/" />
+  <Folder Name="/tests/spikes/">
+    <Project Path="tests/spikes/DesktopAttach/DesktopAttach.csproj" />
+  </Folder>
+  <Folder Name="/tests/tools/">
+    <Project Path="tests/tools/MakeTestMedia/MakeTestMedia.csproj" />
+  </Folder>
+</Solution>

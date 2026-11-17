@@ -1,0 +1,181 @@
+<Window x:Class="WallpaperTray.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="WinWallpaper"
+        Width="460" SizeToContent="Height"
+        ResizeMode="CanMinimize"
+        WindowStartupLocation="Manual"
+        ShowInTaskbar="True">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="20,12,20,20">
+
+            <!-- Header -->
+            <Grid Margin="0,0,0,16">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Image x:Name="AppIcon" Width="28" Height="28" Margin="0,0,10,0" />
+                    <StackPanel>
+                        <TextBlock Text="WinWallpaper" FontSize="20" FontWeight="SemiBold" />
+                        <TextBlock Text="Live wallpapers for your desktop" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </StackPanel>
+                <Border x:Name="StatusPill" HorizontalAlignment="Right" VerticalAlignment="Center"
+                        CornerRadius="12" Padding="10,4" Background="{DynamicResource SubtleFillColorSecondaryBrush}">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse x:Name="StatusDot" Width="8" Height="8" Margin="0,0,6,0" Fill="Gray" />
+                        <TextBlock x:Name="StatusText" Text="Connecting…" FontSize="12" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <!-- Now playing -->
+            <Border Style="{StaticResource Card}" Padding="0">
+                <StackPanel>
+                    <Border CornerRadius="8,8,0,0" ClipToBounds="True" Height="180" Background="{DynamicResource SubtleFillColorSecondaryBrush}">
+                        <Grid>
+                            <Image x:Name="Preview" Stretch="UniformToFill" />
+                            <StackPanel x:Name="EmptyState" VerticalAlignment="Center" HorizontalAlignment="Center">
+                                <TextBlock x:Name="EmptyGlyph" Text="&#xE8B9;" Style="{StaticResource Glyph}" FontSize="36" HorizontalAlignment="Center"
+                                           Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
+                                <TextBlock x:Name="EmptyLabel" Text="No live wallpaper" Margin="0,8,0,0" HorizontalAlignment="Center"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                    <Grid Margin="16,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock x:Name="NowTitle" Text="Nothing playing" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            <TextBlock x:Name="NowDetail" Text="Pick an image, GIF or video below" Style="{StaticResource Caption}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal">
+                            <Button x:Name="PauseButton" Click="OnPauseClick" ToolTip="Pause" Width="40" Height="34" Padding="0" Margin="0,0,6,0">
+                                <TextBlock x:Name="PauseGlyph" Text="&#xE769;" Style="{StaticResource Glyph}" />
+                            </Button>
+                            <Button x:Name="StopButton" Click="OnStopClick" ToolTip="Stop and show the Windows wallpaper" Width="40" Height="34" Padding="0">
+                                <TextBlock Text="&#xE71A;" Style="{StaticResource Glyph}" />
+                            </Button>
+                        </StackPanel>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Choose -->
+            <TextBlock Text="Choose a wallpaper" Style="{StaticResource SectionLabel}" Margin="2,20,0,8" />
+            <UniformGrid Columns="3">
+                <Button Style="{StaticResource Tile}" Margin="0,0,4,0" Click="OnPickImage" ToolTip="PNG, JPEG, BMP, TIFF, HEIC, WebP…">
+                    <StackPanel>
+                        <TextBlock Text="&#xE91B;" Style="{StaticResource Glyph}" FontSize="24" HorizontalAlignment="Center" />
+                        <TextBlock Text="Image" Margin="0,6,0,0" HorizontalAlignment="Center" FontWeight="SemiBold" />
+                        <TextBlock Text="Still picture" Style="{StaticResource Caption}" HorizontalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+                <Button Style="{StaticResource Tile}" Margin="4,0" Click="OnPickGif" ToolTip="Animated GIF">
+                    <StackPanel>
+                        <TextBlock Text="&#xE786;" Style="{StaticResource Glyph}" FontSize="24" HorizontalAlignment="Center" />
+                        <TextBlock Text="GIF" Margin="0,6,0,0" HorizontalAlignment="Center" FontWeight="SemiBold" />
+                        <TextBlock Text="Animated loop" Style="{StaticResource Caption}" HorizontalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+                <Button Style="{StaticResource Tile}" Margin="4,0,0,0" Click="OnPickVideo" ToolTip="MP4, MOV, WMV, MKV, WebM…">
+                    <StackPanel>
+                        <TextBlock Text="&#xE714;" Style="{StaticResource Glyph}" FontSize="24" HorizontalAlignment="Center" />
+                        <TextBlock Text="Video" Margin="0,6,0,0" HorizontalAlignment="Center" FontWeight="SemiBold" />
+                        <TextBlock Text="Plays muted" Style="{StaticResource Caption}" HorizontalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+            </UniformGrid>
+
+            <!-- Playback -->
+            <TextBlock Text="Playback" Style="{StaticResource SectionLabel}" Margin="2,20,0,8" />
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <Grid x:Name="FpsPanel">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="Frame rate" />
+                            <TextBlock x:Name="FpsHint" Text="Applies to GIFs and videos" Style="{StaticResource Caption}" />
+                        </StackPanel>
+                        <CheckBox x:Name="OriginalFps" Grid.Column="1" Content="Original" IsChecked="True" VerticalAlignment="Center"
+                                  Checked="OnFpsModeChanged" Unchecked="OnFpsModeChanged" />
+                        <Grid Grid.Row="1" Grid.ColumnSpan="2" Margin="0,10,0,0" x:Name="FpsSliderRow" IsEnabled="False">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="64" />
+                            </Grid.ColumnDefinitions>
+                            <Slider x:Name="FpsSlider" Minimum="1" Maximum="60" Value="24" TickFrequency="1" IsSnapToTickEnabled="True"
+                                    VerticalAlignment="Center" ValueChanged="OnFpsSliderChanged" />
+                            <TextBlock Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
+                                <Run x:Name="FpsValue" Text="24" FontWeight="SemiBold" /><Run Text=" fps" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            </TextBlock>
+                        </Grid>
+                    </Grid>
+                    <Separator Margin="0,14" />
+                    <Grid>
+                        <StackPanel>
+                            <TextBlock Text="Scaling" />
+                            <TextBlock Text="How the wallpaper fits each monitor" Style="{StaticResource Caption}" />
+                        </StackPanel>
+                        <ComboBox x:Name="FitBox" HorizontalAlignment="Right" VerticalAlignment="Center" Width="120" SelectionChanged="OnFitChanged">
+                            <ComboBoxItem Content="Fill" Tag="fill" IsSelected="True" />
+                            <ComboBoxItem Content="Fit" Tag="fit" />
+                            <ComboBoxItem Content="Stretch" Tag="stretch" />
+                            <ComboBoxItem Content="Center" Tag="center" />
+                        </ComboBox>
+                    </Grid>
+                    <Separator Margin="0,14" />
+                    <Grid>
+                        <StackPanel Margin="0,0,132,0">
+                            <TextBlock Text="Sampling" />
+                            <TextBlock Text="Pixelated keeps pixel art and small GIFs crisp" Style="{StaticResource Caption}" />
+                        </StackPanel>
+                        <ComboBox x:Name="SamplingBox" HorizontalAlignment="Right" VerticalAlignment="Center" Width="120" SelectionChanged="OnSamplingChanged">
+                            <ComboBoxItem Content="Smooth" Tag="smooth" IsSelected="True" ToolTip="Bilinear filtering: best for photos and video" />
+                            <ComboBoxItem Content="Pixelated" Tag="pixelated" ToolTip="Nearest neighbour: hard pixel edges" />
+                        </ComboBox>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Developers -->
+            <TextBlock Text="Developers" Style="{StaticResource SectionLabel}" Margin="2,20,0,8" />
+            <Border Style="{StaticResource Card}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="&#xE943;" Style="{StaticResource Glyph}" FontSize="20" VerticalAlignment="Top" Margin="0,2,14,0"
+                               Foreground="{DynamicResource {x:Static SystemColors.AccentColorBrushKey}}" />
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Text="Custom render outputs" FontWeight="SemiBold" />
+                        <TextBlock Style="{StaticResource Caption}" Margin="0,2,0,8"
+                                   Text="Stream frames from your own app, game or shader straight onto the desktop through the daemon." />
+                        <Grid Margin="0,0,0,8">
+                            <TextBox x:Name="PipeName" IsReadOnly="True" FontFamily="Cascadia Mono, Consolas" FontSize="12"
+                                     Text="\\.\pipe\WinWallpaper.Daemon.v1" Margin="0,0,44,0" />
+                            <Button HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="38" Padding="0" Click="OnCopyPipe" ToolTip="Copy pipe name">
+                                <TextBlock Text="&#xE8C8;" Style="{StaticResource Glyph}" FontSize="14" />
+                            </Button>
+                        </Grid>
+                        <TextBlock>
+                            <Hyperlink Click="OnOpenGuide">How to connect a custom renderer <Run FontFamily="{StaticResource IconFont}" FontSize="11" Text="&#xE8A7;" /></Hyperlink>
+                        </TextBlock>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <TextBlock x:Name="ErrorText" Foreground="{DynamicResource SystemFillColorCriticalBrush}" TextWrapping="Wrap"
+                       Margin="2,12,0,0" Visibility="Collapsed" />
+        </StackPanel>
+    </ScrollViewer>
+</Window>

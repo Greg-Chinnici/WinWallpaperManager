@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms> <!-- NotifyIcon only -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- WPF's Fluent ThemeMode is marked experimental in .NET 10. -->
+    <NoWarn>$(NoWarn);WPF0001;WFO0003</NoWarn> <!-- WFO0003: WPF owns DPI via the manifest -->
+    <AssemblyTitle>WinWallpaper</AssemblyTitle>
+    <ApplicationIcon>../../assets/WinWallpaper.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" /> <!-- keep WPF types unambiguous; WinForms is aliased as Forms -->
+    <Using Remove="System.Drawing" />
+    <Resource Include="../../assets/WinWallpaper.ico" Link="WinWallpaper.ico" />
+    <ProjectReference Include="../WallpaperProtocol/WallpaperProtocol.csproj" />
+  </ItemGroup>
+</Project>

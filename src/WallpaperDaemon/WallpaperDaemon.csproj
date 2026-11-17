@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.8.3" />
+    <ProjectReference Include="..\WallpaperProtocol\WallpaperProtocol.csproj" />
+  </ItemGroup>
+</Project>
