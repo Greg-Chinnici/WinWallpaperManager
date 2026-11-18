@@ -180,6 +180,8 @@ internal sealed class Daemon : IDisposable
                     await StopSourceLocked();
                     await SaveAsync();
                     return Status();
+                case "host.status": // diagnostics: the host's own counters (frames presented per layer, ...)
+                    return await Host(new JsonObject { ["cmd"] = "status" });
                 case "overlay.stop":
                     await RevokeExternalLocked(Layer.Overlay, restore: false);
                     return Status();

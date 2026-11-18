@@ -62,7 +62,8 @@ process. The daemon never touches an app's pixels; it only decides which session
 shows.
 
 Want the details? [docs/architecture.md](docs/architecture.md) has the design and
-measurements, and [docs/desktop-integration.md](docs/desktop-integration.md) explains how
+measurements, [docs/benchmarks.md](docs/benchmarks.md) has frame-rate results for every
+transport up to 180 fps at 4K, and [docs/desktop-integration.md](docs/desktop-integration.md) explains how
 drawing behind the desktop icons works on Windows 11 (24H2+), with spike results.
 
 ## Write your own renderer
@@ -184,11 +185,11 @@ Untagged CI builds are versioned `0.1.<run number>`.
 | `samples/` | Custom renderers: GPU (D3D11 / D3D12 / Vulkan), clock, plasma, Python |
 | `tests/spikes/DesktopAttach` | Research spike: desktop attach, hang tests, frame transports, GPU fences |
 | `tests/tools/MakeTestMedia` | Generates deterministic test media |
-| `build/` | `publish.ps1` (app folder + MSI), `smoke.ps1` (end-to-end check), `make-icon.ps1` |
+| `build/` | `publish.ps1` (app folder + MSI), `smoke.ps1` (end-to-end check), `bench.ps1` (frame-rate matrix), `make-icon.ps1` |
 | `installer/` | WiX v5 per-user MSI |
 | `assets/` | App icon |
 | `.github/workflows/` | CI and releases |
-| `docs/` | Architecture, desktop integration, renderer guide |
+| `docs/` | Architecture, desktop integration, renderer guide, benchmarks |
 
 ## Status and known gaps
 

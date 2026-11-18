@@ -51,6 +51,7 @@ internal sealed class Renderer : IDisposable
         public int FrameW, FrameH;
         public bool HasFrame;
         public long Presented;
+        public long PresentTicks; // time spent copying + presenting frames (benchmarks)
         public bool Opaque => Kind == Layer.Desktop;
     }
 
@@ -139,6 +140,7 @@ internal sealed class Renderer : IDisposable
             o[l.Kind.ToWire()] = new System.Text.Json.Nodes.JsonObject
             {
                 ["session"] = l.Active?.Id, ["visible"] = l.HasFrame, ["presented"] = l.Presented,
+                ["torn"] = (l.Active as CpuHostSession)?.Torn ?? 0, ["presentMs"] = Math.Round(l.PresentTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency, 1),
                 ["transport"] = l.Active?.Map.Transport.ToWire(), ["width"] = l.Active?.Width, ["height"] = l.Active?.Height,
             };
         o["sessions"] = _sessions.Count;
@@ -287,9 +289,11 @@ internal sealed class Renderer : IDisposable
             });
             l.FrameW = s.Width; l.FrameH = s.Height;
         }
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         if (!s.CopyLatest(_ctx!, l.Frame)) return;
         foreach (var t in l.Targets) PresentTo(l, t);
         _comp!.Commit();
+        l.PresentTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
         l.Presented++;
         SetHasFrame(l, true);
     }

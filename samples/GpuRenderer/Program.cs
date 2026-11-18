@@ -26,7 +26,8 @@ if (seconds > 0) stop.CancelAfter(TimeSpan.FromSeconds(seconds));
 //    and duplicates their handles into this process.
 using var session = await WallpaperSession.ConnectAsync(new SessionOptions
 {
-    Name = $"GPU sample ({api})", Layer = layer, Transport = Transport.Gpu, Width = w, Height = h, Api = api,
+    Name = $"GPU sample ({api})", Layer = layer, Width = w, Height = h, Api = api,
+    Transport = api == "cpu" ? Transport.Cpu : Transport.Gpu, // --api cpu: CPU transport, for comparison
 });
 session.RevokedChanged += () => { Console.WriteLine("Revoked: another renderer or wallpaper took this layer."); stop.Cancel(); };
 
@@ -34,25 +35,36 @@ session.RevokedChanged += () => { Console.WriteLine("Revoked: another renderer o
 var look = new Look(api, layer == Layer.Overlay);
 using IBackend backend = api switch
 {
+    "cpu" => new CpuBackend(session, look),
     "d3d12" => new D3D12Backend(session, look),
     "vulkan" => new VulkanBackend(session, look),
     _ => new D3D11Backend(session, look),
 };
 Console.WriteLine($"Session {session.Descriptor.Id}: {api} on the {layer.ToWire()} layer, {w}x{h} @ {fps} fps. Ctrl+C to stop.");
 
-// 3. Render at our own pace.
+// 3. Render at our own pace. A high-resolution waitable timer keeps 120-180 fps targets honest
+//    (PeriodicTimer follows the ~15.6 ms system tick and tops out around 64 fps).
 long rendered = 0, skipped = 0;
+var proc = Process.GetCurrentProcess();
+var cpu0 = proc.TotalProcessorTime;
 var clock = Stopwatch.StartNew();
-using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1.0 / fps));
-try
+using (var pacer = new HighResPacer())
 {
-    while (await timer.WaitForNextTickAsync(stop.Token))
+    var period = Stopwatch.Frequency / (double)fps;
+    var start = Stopwatch.GetTimestamp();
+    for (long tick = 1; !stop.IsCancellationRequested; tick++)
     {
         if (backend.RenderFrame(clock.Elapsed.TotalSeconds)) rendered++; else skipped++;
+        var due = start + (long)(tick * period);
+        if (Stopwatch.GetTimestamp() > due + (long)period) { start = Stopwatch.GetTimestamp(); tick = 0; } // fell behind: don't burst
+        else pacer.WaitUntil(due, stop.Token.WaitHandle);
     }
 }
-catch (OperationCanceledException) { }
-Console.WriteLine($"Rendered {rendered} frames ({skipped} ticks skipped while the host held the slot) in {clock.Elapsed.TotalSeconds:0.0}s.");
+var elapsed = clock.Elapsed.TotalSeconds;
+proc.Refresh();
+Console.WriteLine($"Rendered {rendered} frames ({skipped} ticks skipped while the host held the slot) in {elapsed:0.0}s.");
+// One machine-readable line for build/bench.ps1.
+Console.WriteLine($"BENCH {{\"api\":\"{api}\",\"width\":{w},\"height\":{h},\"target\":{fps},\"rendered\":{rendered},\"skipped\":{skipped},\"seconds\":{elapsed:0.000},\"cpuMs\":{(proc.TotalProcessorTime - cpu0).TotalMilliseconds:0}}}");
 
 namespace GpuRenderer
 {
