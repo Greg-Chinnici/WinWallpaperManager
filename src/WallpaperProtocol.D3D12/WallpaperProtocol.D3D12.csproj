@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><Description>WinWallpaper GPU transport helper for Direct3D 12 producers.</Description></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <ProjectReference Include="../WallpaperProtocol/WallpaperProtocol.csproj" />
+  </ItemGroup>
+</Project>

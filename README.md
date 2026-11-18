@@ -15,7 +15,9 @@
 - Draws behind your desktop icons on every monitor. Icons, right-click and Win+D keep working.
 - Plays still **images**, animated **GIFs** and **videos** (looped, muted), with a custom frame rate for GIFs and video.
 - Scaling per monitor (Fill / Fit / Stretch / Center), plus Smooth or Pixelated sampling for pixel art.
-- Lets **any app stream its own frames** to the desktop: games, dashboards, generative art, a clock.
+- Lets **any app stream its own frames**: games, dashboards, generative art, a clock. Frames
+  can go to the **desktop layer** (the wallpaper) or a click-through **overlay layer** above
+  every window, from the **CPU** or straight from the **GPU** with Direct3D 11, Direct3D 12 or Vulkan.
 - Costs nothing when nothing moves: a static wallpaper uses 0 % CPU, and the processes block on events instead of polling.
 - Survives Explorer restarts and display changes, and remembers your wallpaper.
 
@@ -26,33 +28,38 @@ Three small processes, each with one job:
 ```mermaid
 flowchart LR
     Tray["<b>WallpaperTray</b><br/>WPF tray app<br/><i>configuration only</i>"]
-    Daemon["<b>WallpaperDaemon</b><br/>state · sources · events<br/><i>decodes image / GIF / video</i>"]
-    Host["<b>WallpaperHost</b><br/>Win32 · D3D11 · DirectComposition<br/><i>shows frames, nothing else</i>"]
-    App["<b>Your renderer</b><br/>any language"]
-    Desktop(["Windows desktop<br/>behind the icons"])
+    Daemon["<b>WallpaperDaemon</b><br/>state · sources · layer ownership<br/><i>decodes image / GIF / video</i>"]
+    Host["<b>WallpaperHost</b><br/>Win32 · D3D11 · DirectComposition<br/><i>owns every session's resources</i>"]
+    App["<b>Your renderer</b><br/>CPU, D3D11, D3D12 or Vulkan"]
+    Session[("<b>session</b><br/>CPU: shared-memory ring<br/>GPU: shared textures + fences")]
+    Desktop(["desktop layer<br/>behind the icons"])
+    Overlay(["overlay layer<br/>above all windows"])
 
-    Tray -- "JSON over named pipe" --> Daemon
-    App -- "1. external.begin (pipe)" --> Daemon
-    Daemon -- "control pipe<br/>show / hide / fit" --> Host
-    Daemon -- "frames" --> Ring[("shared-memory<br/>frame ring")]
-    App -- "2. frames" --> Ring
-    Ring -- "event: frame ready" --> Host
+    Tray -- "JSON pipe" --> Daemon
+    App -- "1. external.begin<br/>(layer, transport, size)" --> Daemon
+    Daemon -- "2. session.create / activate" --> Host
+    Host -- "3. creates; GPU handles<br/>duplicated into your process" --> Session
+    App -- "4. frames" --> Session
+    Session -- "event + fence" --> Host
     Host --> Desktop
+    Host --> Overlay
 ```
 
 | Component | Owns | Doesn't know about |
 |---|---|---|
-| **WallpaperHost** | One window per monitor parented into Explorer's desktop, D3D11 swap chains, GPU scaling via DirectComposition, recovery when Explorer restarts | Files, GIFs, video, schedules, other apps |
-| **WallpaperDaemon** | What is playing and why, decoding (WIC, Media Foundation), playback timing, who may draw (writer tokens), saved state, the public pipe API | Windows, GPUs, monitors |
-| **WallpaperTray** | The UI: file pickers, frame rate, scaling, pause/stop | Rendering. Close it and the wallpaper keeps running |
+| **WallpaperHost** | Per-monitor windows on two layers (desktop: parented into Explorer behind the icons; overlay: top-most, click-through), every session's shared memory, textures and fences, D3D11 + DirectComposition presentation, GPU scaling, Explorer-restart recovery | Files, GIFs, video, schedules, which app is which |
+| **WallpaperDaemon** | What is on each layer and why, decoding (WIC, Media Foundation), playback timing, brokering sessions for apps, saved state, the public pipe API | Windows, GPUs, monitors |
+| **WallpaperTray** | The UI: file pickers, frame rate, scaling, sampling, pause/stop, removing an overlay | Rendering. Close it and the wallpaper keeps running |
 
 **Design rules:** the renderer is dumb, the daemon owns state, the tray owns
 configuration, the protocol is versioned, and everything is event-driven.
 
-**How frames move:** whoever produces pixels (the daemon's decoders or your app) writes
-them into a shared-memory ring and signals an event. The host wakes, copies the frame
-to the GPU and presents it. The daemon never copies an external app's pixels; it only
-decides *whose* frames the host accepts.
+**How frames move:** every producer (the daemon's own decoders or your app) gets a
+**session** on one layer, and the host creates its resources. CPU sessions write rows into
+shared memory. GPU sessions render into shared textures, signal a shared fence, and the
+host's GPU waits on it before copying. No CPU copies, and no thread ever blocks on another
+process. The daemon never touches an app's pixels; it only decides which session each layer
+shows.
 
 Want the details? [docs/architecture.md](docs/architecture.md) has the design and
 measurements, and [docs/desktop-integration.md](docs/desktop-integration.md) explains how
@@ -60,39 +67,46 @@ drawing behind the desktop icons works on Windows 11 (24H2+), with spike results
 
 ## Write your own renderer
 
-Anything that can open a named pipe and a memory-mapped file can drive the wallpaper. In C#:
+When you connect, choose a **layer** and a **transport**:
+
+| | CPU transport | GPU transport |
+|---|---|---|
+| **Desktop layer** (wallpaper, alpha ignored) | Write BGRA rows into shared memory. Any language | Render into shared textures with D3D11, D3D12 or Vulkan. No copies |
+| **Overlay layer** (above all windows, click-through, premultiplied alpha) | Same, with transparency | Same, with transparency |
 
 ```csharp
 using WallpaperProtocol;
 
-using var output = await ExternalOutput.ConnectAsync("My Renderer"); // take the wallpaper
-var pixels = new byte[1920 * 1080 * 4];                             // BGRA8, top-down
-
-while (!output.Revoked)                  // becomes true if the user picks another wallpaper
+using var session = await WallpaperSession.ConnectAsync(new SessionOptions
+{
+    Name = "My Renderer", Layer = Layer.Overlay, Transport = Transport.Cpu, Width = 1920, Height = 1080,
+});
+var pixels = new byte[1920 * 1080 * 4];          // BGRA8, top-down, premultiplied on the overlay
+while (!session.Revoked)                          // true once the user or another app takes the layer
 {
     DrawSomething(pixels);
-    output.Submit(pixels, 1920, 1080);   // the host scales it to every monitor
-    await Task.Delay(33);                // your pace; publish only when something changed
+    session.Cpu!.Submit(pixels);                  // the host scales it to every monitor
+    await Task.Delay(33);                         // your pace; publish only when something changed
 }
-// Disposing hands the wallpaper back: the previous one returns automatically.
+// Disposing ends the session: the overlay disappears / the user's wallpaper comes back.
 ```
 
-The protocol in one paragraph: send `{"cmd":"external.begin","name":"…"}` to
-`\\.\pipe\WinWallpaper.Daemon.v1` and keep the pipe open. You get a `writer` token.
-Write a frame into slot `seq % 3` of `Local\WinWallpaper.Frames.v1`, fill in the
-64-byte header with your token, bump `seq`, and set `Local\WinWallpaper.FrameReady.v1`.
-That's all.
+For the GPU transport, add the helper for your API (`WallpaperProtocol.D3D11`, `.D3D12` or
+`.Vulkan`). It opens or imports the host's textures and fences on your device and gives you
+`BeginFrame()` / `EndFrame()`.
 
 **Samples** (start the tray app first so the daemon is running):
 
 | Sample | Run it |
 |---|---|
-| Digital clock over your own background image, optional seconds | `dotnet run --project samples/ClockRenderer -- --background "C:\Pictures\photo.jpg" --seconds` |
-| Animated plasma | `dotnet run --project samples/ExternalRenderer -- --seconds 20` |
-| Raw protocol, no SDK (Python standard library) | `python samples/python/color_cycle.py 10` |
+| GPU: same scene in D3D11, D3D12 or Vulkan, either layer | `dotnet run --project samples/GpuRenderer -- --api vulkan --layer overlay` |
+| Digital clock: wallpaper over your own image, or a floating overlay | `dotnet run --project samples/ClockRenderer -- --background "C:\Pictures\photo.jpg" --seconds`<br/>`dotnet run --project samples/ClockRenderer -- --overlay --seconds` |
+| Animated plasma (CPU) | `dotnet run --project samples/ExternalRenderer -- --seconds 20` |
+| Raw protocol, no SDK (Python standard library) | `python samples/python/color_cycle.py 10 --overlay` |
 
 **Full guide:** [docs/custom-render-outputs.md](docs/custom-render-outputs.md) covers the
-byte layout, lifecycle and revocation, all pipe commands, and troubleshooting.
+protocol byte by byte, GPU import for each API, lifecycle and revocation, all pipe
+commands, and troubleshooting.
 
 ## Getting started
 
@@ -162,11 +176,12 @@ Untagged CI builds are versioned `0.1.<run number>`.
 
 | Path | What |
 |---|---|
-| `src/WallpaperProtocol` | Shared names, frame ring, JSON pipe, `ExternalOutput` client: **start here if you write a renderer** |
+| `src/WallpaperProtocol` | Protocol v2: `WallpaperSession` client, session map, JSON pipe. **Start here if you write a renderer** |
+| `src/WallpaperProtocol.D3D11` / `.D3D12` / `.Vulkan` | GPU transport helpers: open/import the host's shared textures and fences |
 | `src/WallpaperHost` | Desktop attachment and presentation |
 | `src/WallpaperDaemon` | State, sources (`Sources/`), pipe API |
 | `src/WallpaperTray` | WPF tray app (Fluent theme) |
-| `samples/` | Custom renderers: clock, plasma, Python |
+| `samples/` | Custom renderers: GPU (D3D11 / D3D12 / Vulkan), clock, plasma, Python |
 | `tests/spikes/DesktopAttach` | Research spike: desktop attach, hang tests, frame transports, GPU fences |
 | `tests/tools/MakeTestMedia` | Generates deterministic test media |
 | `build/` | `publish.ps1` (app folder + MSI), `smoke.ps1` (end-to-end check), `make-icon.ps1` |
@@ -180,10 +195,9 @@ Untagged CI builds are versioned `0.1.<run number>`.
 | Area | State |
 |---|---|
 | Images, GIFs, video, scaling, sampling, pause/stop | Working |
-| Custom renderers (CPU frames) | Working, protocol v1 |
+| Custom renderers: desktop + overlay layers, CPU + GPU (D3D11 / D3D12 / Vulkan) | Working, protocol v2 |
 | Multi-monitor | Same wallpaper on all monitors. **Per-monitor wallpapers not yet** |
 | Video decoding | Software decode, ~30 % of a core for 720p30. **GPU decode is next** |
-| GPU frames for renderers (shared textures + fences) | Proven in the spike, not in protocol v1 yet |
 | Events (lock, idle, game launched…) | Not started |
 | Per-user MSI, auto-start at sign-in, CI, tagged pre-releases | Working. **Not code-signed yet** |
 | Windows 11 23H2 and older, mixed-DPI monitors, monitor hot-plug | Code paths exist but are untested |

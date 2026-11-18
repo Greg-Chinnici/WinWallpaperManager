@@ -178,6 +178,39 @@ neither side ever blocks, and back-pressure is explicit. Costs:
 - Vortice 3.8 also hides `ID3D11Fence::CreateSharedHandle`, so it goes through the
   same COM vtable shim.
 
+## Protocol v2: sessions, layers, transports (2026-11-17)
+
+v1 had one global frame ring, and the daemon handed out "writer tokens". v2 replaces that with
+**sessions**:
+
+- A producer asks the daemon for a session on a **layer** (`desktop` | `overlay`), choosing a
+  **transport** (`cpu` | `gpu`), a size and an alpha mode. The daemon's own image/GIF/video
+  sources use exactly the same mechanism (a CPU session on the desktop layer).
+- The **host creates every session's resources**: a shared-memory map (header plus CPU slots
+  sized to the frame, not a fixed 4K), a ready event, and for GPU sessions 3 D3D11 textures
+  (`SHARED | SHARED_NTHANDLE`) and two shared fences. GPU handles are `DuplicateHandle`d
+  **into the producer's process**, which the daemon identifies with `GetNamedPipeClientProcessId`
+  (kernel-reported, so it can't be spoofed).
+- Producers therefore only ever **import**. That's what makes three APIs possible against one
+  D3D11 host: D3D11 opens with `OpenSharedResource1` / `OpenSharedFence`, D3D12 with
+  `OpenSharedHandle`, and Vulkan imports the textures as `D3D11_TEXTURE_BIT` memory and the
+  fences as timeline semaphores (`D3D12_FENCE_BIT`). All three were verified on an RTX 2060 at
+  ~60 fps with 0 skipped frames, on both layers.
+- **Sync is fence-based**, as chosen in the spike: produced fence = Seq + 1 (the host's GPU
+  waits on it), consumed fence = Seq + 1 after the copy (producers check it before reusing a
+  slot). No CPU thread ever waits on another process.
+- **Layers are independent.** Desktop: the daemon's source or one external session.
+  Overlay: one external session or nothing. Last request wins, the loser gets `external.ended`,
+  and the desktop layer falls back to the daemon's source when an external session ends.
+- **Overlay windows** are top-level per monitor with `WS_EX_TOPMOST | WS_EX_LAYERED |
+  WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP`, presenting a
+  premultiplied-alpha DirectComposition visual. Verified: drawn above windows and the taskbar,
+  and clicks go to the window underneath.
+
+Not yet: GPU frames for the daemon's own video (it still decodes on the CPU), a producer
+restart reusing its session, AppContainer/elevated producers (handle duplication needs
+`PROCESS_DUP_HANDLE` on them), and per-monitor content.
+
 ## POC status (2026-11-16)
 
 Working end to end on Windows 11 build 26200, two monitors:

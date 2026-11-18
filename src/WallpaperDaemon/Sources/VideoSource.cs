@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using Vortice.MediaFoundation;
-using WallpaperProtocol;
 
 namespace WallpaperDaemon.Sources;
 
@@ -19,21 +18,22 @@ internal sealed class VideoSource : Source
     private readonly AutoResetEvent _wake = new(false);
     private Thread? _thread;
     private FrameSink? _sink;
-    private Exception? _startError;
-    private readonly ManualResetEventSlim _started = new(false);
 
     public long FramesShown, FramesSkipped;
 
     public VideoSource(string path, double fps) : base(path) => Fps = fps;
     public override string Kind => "video";
 
+    private IMFSourceReader? _reader;
+
+    /// <summary>Open the file now so a bad file fails the request and the size is known.</summary>
+    public override void Prepare() => _reader = Open();
+
     public override void Start(FrameSink sink)
     {
         _sink = sink;
         _thread = new Thread(Play) { IsBackground = true, Name = "video" };
         _thread.Start();
-        _started.Wait(TimeSpan.FromSeconds(10));
-        if (_startError is not null) throw _startError;
     }
 
     private IMFSourceReader Open()
@@ -58,17 +58,14 @@ internal sealed class VideoSource : Source
             NativeFps = den > 0 ? Math.Round(num / den, 2) : 0;
         }
         catch { NativeFps = 0; }
-        if (Width > FrameChannel.MaxWidth || Height > FrameChannel.MaxHeight)
-            throw new NotSupportedException($"Video is {Width}x{Height}; max {FrameChannel.MaxWidth}x{FrameChannel.MaxHeight}");
+        if (Width > Limits.MaxWidth || Height > Limits.MaxHeight)
+            throw new NotSupportedException($"Video is {Width}x{Height}; max {Limits.MaxWidth}x{Limits.MaxHeight}");
         return reader;
     }
 
     private unsafe void Play()
     {
-        IMFSourceReader reader;
-        try { reader = Open(); }
-        catch (Exception ex) { _startError = ex; _started.Set(); return; }
-        _started.Set();
+        var reader = _reader!;
 
         using var pacer = new Pacer();
         long clockStart = Stopwatch.GetTimestamp(); // QPC time of timestamp 0 in the current loop
@@ -143,5 +140,6 @@ internal sealed class VideoSource : Source
     {
         _stop.Set(); _wake.Set(); _running.Set();
         _thread?.Join(3000);
+        if (_thread is null) _reader?.Dispose(); // prepared but never started
     }
 }

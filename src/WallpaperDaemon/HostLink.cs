@@ -9,8 +9,9 @@ internal sealed class HostLink : IDisposable
 {
     private readonly SemaphoreSlim _lock = new(1, 1);
     private JsonPipe? _pipe;
+    private bool _everConnected;
 
-    /// <summary>Raised after a (re)connect, so the daemon can restore show/fit/frame state.</summary>
+    /// <summary>Raised after reconnecting to a (new) host, which has lost every session.</summary>
     public event Func<Task>? Reconnected;
 
     public async Task<JsonObject> SendAsync(JsonObject msg)
@@ -23,7 +24,13 @@ internal sealed class HostLink : IDisposable
             {
                 try
                 {
-                    if (_pipe is null || !_pipe.IsConnected) { _pipe?.Dispose(); _pipe = await ConnectOrStartAsync(); reconnected = true; }
+                    if (_pipe is null || !_pipe.IsConnected)
+                    {
+                        _pipe?.Dispose();
+                        _pipe = await ConnectOrStartAsync();
+                        reconnected = _everConnected; // only a *re*connect means the host lost its sessions
+                        _everConnected = true;
+                    }
                     return await _pipe.RequestAsync(msg);
                 }
                 catch (Exception ex) when (attempt == 0)

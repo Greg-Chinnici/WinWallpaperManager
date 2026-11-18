@@ -76,6 +76,13 @@ internal static unsafe class Native
     [DllImport("user32")] public static extern bool EnumDisplayMonitors(nint hdc, nint clip, MonitorEnumProc f, nint l);
     [DllImport("shcore")] public static extern int GetDpiForMonitor(nint mon, int type, out uint dpiX, out uint dpiY);
     [DllImport("kernel32")] public static extern nint GetModuleHandle(nint name);
+    [DllImport("kernel32", SetLastError = true)] public static extern nint OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32", SetLastError = true)] public static extern bool DuplicateHandle(nint srcProc, nint src, nint dstProc, out nint dst, uint access, bool inherit, uint options);
+    [DllImport("kernel32")] public static extern nint GetCurrentProcess();
+    [DllImport("kernel32")] public static extern bool CloseHandle(nint h);
+    public const uint PROCESS_DUP_HANDLE = 0x0040, DUPLICATE_CLOSE_SOURCE = 0x1, DUPLICATE_SAME_ACCESS = 0x2;
+    public const uint WS_EX_TOPMOST = 0x8, WS_EX_TRANSPARENT = 0x20;
+    public static readonly nint HWND_TOPMOST = -1;
     [DllImport("kernel32")] public static extern uint GetCurrentThreadId();
 
     public static string ClassOf(nint h) { var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }

@@ -1,13 +1,18 @@
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
+using Microsoft.Win32.SafeHandles;
 using WallpaperDaemon.Sources;
 using WallpaperProtocol;
 
 namespace WallpaperDaemon;
 
 /// <summary>
-/// Owns wallpaper state: what is playing, why, and who may write frames.
-/// API: \\.\pipe\WinWallpaper.Daemon.v1, one JSON object per line (see docs/custom-render-outputs.md).
+/// Owns wallpaper state: what is on each layer, why, and who may draw there.
+///   Desktop layer: the daemon's own source (image/GIF/video) or an external renderer.
+///   Overlay layer: an external renderer or nothing.
+/// The host owns every session's resources; the daemon brokers them and decides which is active.
+/// API: \\.\pipe\WinWallpaper.Daemon.v2, one JSON object per line (see docs/custom-render-outputs.md).
 /// </summary>
 internal sealed class Daemon : IDisposable
 {
@@ -15,38 +20,43 @@ internal sealed class Daemon : IDisposable
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinWallpaper", "state.json");
 
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly FrameChannel _channel = FrameChannel.Open();
-    private readonly FrameSink _sink;
     private readonly HostLink _host = new();
     private readonly CancellationTokenSource _quit = new();
+    private readonly FrameSink _sink = new();
 
+    // The daemon's own wallpaper and the CPU session it plays into.
     private Source? _source;
+    private int _sourceSession;
+    private SessionMap? _sourceMap;
     private bool _paused;
-    private string _fit = "fill";
-    private string _sampling = "smooth"; // smooth | pixelated
-    private string _lastError = "";
+    private string _fit = "fill", _sampling = "smooth", _lastError = "";
 
-    // External render output currently owning the wallpaper.
-    private ExternalSession? _external;
-    private int _nextWriter = 2;
+    // External renderer owning each layer (index = Layer).
+    private readonly ExternalSession?[] _external = new ExternalSession?[2];
 
-    private sealed record ExternalSession(int Writer, string Name, JsonPipe Pipe);
+    private sealed record ExternalSession(int Id, Layer Layer, string Name, Transport Transport, string Api, int Width, int Height, JsonPipe Pipe);
 
-    public Daemon()
-    {
-        _sink = new FrameSink(_channel);
-        _host.Reconnected += OnHostReconnected;
-    }
+    public Daemon() => _host.Reconnected += OnHostReconnected;
 
     public async Task RunAsync()
     {
         await RestoreAsync();
-        var servers = Enumerable.Range(0, 4).Select(_ => AcceptLoop()).ToArray(); // up to 4 waiting listeners
+        var listeners = Enumerable.Range(0, 4).Select(_ => AcceptLoop()).ToArray();
         try { await Task.Delay(Timeout.Infinite, _quit.Token); } catch (OperationCanceledException) { }
         Log.Write("Daemon stopping");
     }
 
+    private async Task<JsonObject> Host(JsonObject msg)
+    {
+        var r = await _host.SendAsync(msg);
+        if (r["ok"]?.GetValue<bool>() != true) throw new InvalidOperationException($"host: {r["error"]}");
+        return r;
+    }
+
     // ---------------- pipe server ----------------
+
+    [DllImport("kernel32", SetLastError = true)]
+    private static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint processId);
 
     private async Task AcceptLoop()
     {
@@ -61,11 +71,12 @@ internal sealed class Daemon : IDisposable
             }
             catch (OperationCanceledException) { return; }
             catch (Exception ex) { Log.Write("Accept failed: " + ex.Message); await Task.Delay(500); continue; }
-            _ = Task.Run(() => HandleClient(new JsonPipe(server)));
+            GetNamedPipeClientProcessId(server.SafePipeHandle, out var pid); // trusted: comes from the kernel, not the client
+            _ = Task.Run(() => HandleClient(new JsonPipe(server), (int)pid));
         }
     }
 
-    private async Task HandleClient(JsonPipe pipe)
+    private async Task HandleClient(JsonPipe pipe, int clientPid)
     {
         ExternalSession? owned = null;
         try
@@ -85,7 +96,8 @@ internal sealed class Daemon : IDisposable
                 {
                     if ((string?)req["cmd"] == "external.begin")
                     {
-                        (resp, owned) = await BeginExternalAsync(pipe, (string?)req["name"] ?? "External renderer");
+                        if (owned is not null) throw new InvalidOperationException("this connection already owns a session; open another connection");
+                        (resp, owned) = await BeginExternalAsync(pipe, req, clientPid);
                     }
                     else resp = await HandleAsync(req);
                 }
@@ -96,7 +108,7 @@ internal sealed class Daemon : IDisposable
         catch (Exception) { /* client went away */ }
         finally
         {
-            if (owned is not null) await EndExternalAsync(owned, restorePrevious: true);
+            if (owned is not null) await EndExternalAsync(owned);
             pipe.Dispose();
         }
     }
@@ -114,8 +126,7 @@ internal sealed class Daemon : IDisposable
                 {
                     var path = (string?)req["path"] ?? throw new ArgumentException("path is required");
                     var kind = (string?)req["kind"] ?? KindFromExtension(path);
-                    var fps = req["fps"]?.GetValue<double>() ?? 0;
-                    await SetSourceLocked(kind, path, fps);
+                    await SetSourceLocked(kind, path, req["fps"]?.GetValue<double>() ?? 0);
                     await SaveAsync();
                     return Status();
                 }
@@ -125,7 +136,7 @@ internal sealed class Daemon : IDisposable
                     return Status();
                 case "fit":
                     _fit = ((string?)req["mode"] ?? "fill").ToLowerInvariant();
-                    await _host.SendAsync(new JsonObject { ["cmd"] = "fit", ["mode"] = _fit });
+                    await Host(new JsonObject { ["cmd"] = "fit", ["mode"] = _fit });
                     await SaveAsync();
                     return Status();
                 case "sampling":
@@ -133,7 +144,7 @@ internal sealed class Daemon : IDisposable
                     var mode = ((string?)req["mode"] ?? "smooth").ToLowerInvariant();
                     if (mode is not ("smooth" or "pixelated")) return JsonPipe.Error("mode must be 'smooth' or 'pixelated'");
                     _sampling = mode;
-                    await _host.SendAsync(new JsonObject { ["cmd"] = "sampling", ["mode"] = _sampling });
+                    await Host(new JsonObject { ["cmd"] = "sampling", ["mode"] = _sampling });
                     await SaveAsync();
                     return Status();
                 }
@@ -145,17 +156,18 @@ internal sealed class Daemon : IDisposable
                     _paused = false; _source?.Resume();
                     await SaveAsync();
                     return Status();
-                case "stop":
-                    await RevokeExternalLocked();
-                    StopSourceLocked();
-                    _channel.ActiveWriter = 0;
-                    await _host.SendAsync(new JsonObject { ["cmd"] = "hide" });
+                case "stop": // clear the desktop layer: Windows' own wallpaper shows again
+                    await RevokeExternalLocked(Layer.Desktop, restore: false);
+                    await StopSourceLocked();
                     await SaveAsync();
                     return Status();
+                case "overlay.stop":
+                    await RevokeExternalLocked(Layer.Overlay, restore: false);
+                    return Status();
                 case "quit":
-                    await RevokeExternalLocked();
-                    StopSourceLocked();
-                    _channel.ActiveWriter = 0;
+                    await RevokeExternalLocked(Layer.Overlay, restore: false);
+                    await RevokeExternalLocked(Layer.Desktop, restore: false);
+                    await StopSourceLocked();
                     try { await _host.SendAsync(new JsonObject { ["cmd"] = "quit" }); } catch { }
                     _quit.Cancel();
                     return JsonPipe.Ok();
@@ -173,11 +185,11 @@ internal sealed class Daemon : IDisposable
         _ => "image",
     };
 
+    // ---------------- the daemon's own wallpaper ----------------
+
     private async Task SetSourceLocked(string kind, string path, double fps)
     {
         if (!File.Exists(path)) throw new FileNotFoundException("File not found", path);
-        await RevokeExternalLocked();
-        StopSourceLocked();
         Source source = kind switch
         {
             "image" => new ImageSource(path),
@@ -185,103 +197,138 @@ internal sealed class Daemon : IDisposable
             "video" => new VideoSource(path, fps),
             _ => throw new ArgumentException($"unknown kind '{kind}'"),
         };
+        int session = 0;
+        SessionMap? map = null;
         try
         {
-            _channel.ActiveWriter = FrameSink.DaemonWriter;
-            source.Start(_sink);
+            source.Prepare(); // decode/open first: a bad file fails here, with the old wallpaper untouched
+            (session, map) = await CreateOwnSessionAsync(source.Width, source.Height);
         }
         catch (Exception ex)
         {
-            source.Dispose();
+            source.Dispose(); map?.Dispose();
+            if (session != 0) try { await Host(new JsonObject { ["cmd"] = "session.destroy", ["id"] = session }); } catch { }
             _lastError = $"{Path.GetFileName(path)}: {ex.Message}";
             Log.Write("Source failed: " + ex);
             throw;
         }
-        _source = source;
-        _lastError = "";
+
+        // Switch over: new source starts in its own session, then the old one goes away (no flash).
+        await RevokeExternalLocked(Layer.Desktop, restore: false);
+        var (oldSource, oldSession, oldMap) = (_source, _sourceSession, _sourceMap);
+        oldSource?.Dispose();
+        _sink.Attach(map);
+        _source = source; _sourceSession = session; _sourceMap = map;
+        source.Start(_sink);
         if (_paused) source.Pause();
-        await _host.SendAsync(new JsonObject { ["cmd"] = "fit", ["mode"] = _fit });
-        await _host.SendAsync(new JsonObject { ["cmd"] = "sampling", ["mode"] = _sampling });
-        await _host.SendAsync(new JsonObject { ["cmd"] = "show" });
-        Log.Write($"Now playing {kind} {path} ({source.Width}x{source.Height}, fps={(fps > 0 ? fps : "native")})");
+        await Host(new JsonObject { ["cmd"] = "session.activate", ["id"] = session });
+        if (oldSession != 0) await Host(new JsonObject { ["cmd"] = "session.destroy", ["id"] = oldSession });
+        oldMap?.Dispose();
+        _lastError = "";
+        Log.Write($"Now playing {kind} {path} ({source.Width}x{source.Height}, fps={(fps > 0 ? fps : "native")}, session {session})");
     }
 
-    private void StopSourceLocked()
+    private async Task<(int, SessionMap)> CreateOwnSessionAsync(int w, int h)
+    {
+        var r = await Host(new JsonObject
+        {
+            ["cmd"] = "session.create", ["layer"] = "desktop", ["transport"] = "cpu",
+            ["width"] = w, ["height"] = h, ["alpha"] = "opaque", ["pid"] = Environment.ProcessId,
+        });
+        var d = SessionDescriptor.FromJson((JsonObject)r["session"]!);
+        return (d.Id, SessionMap.Open(d.MapName, d.ReadyEvent));
+    }
+
+    private async Task StopSourceLocked()
     {
         _source?.Dispose();
         _source = null;
+        _sink.Attach(null);
+        if (_sourceSession != 0) { try { await Host(new JsonObject { ["cmd"] = "session.destroy", ["id"] = _sourceSession }); } catch { } }
+        _sourceMap?.Dispose();
+        _sourceSession = 0; _sourceMap = null;
     }
 
-    // ---------------- external render outputs ----------------
+    // ---------------- external renderers ----------------
 
-    private async Task<(JsonObject, ExternalSession)> BeginExternalAsync(JsonPipe pipe, string name)
+    private async Task<(JsonObject, ExternalSession)> BeginExternalAsync(JsonPipe pipe, JsonObject req, int clientPid)
     {
+        var name = (string?)req["name"] ?? "Custom renderer";
+        var layer = ProtocolText.ParseLayer((string?)req["layer"]);
+        var transport = ProtocolText.ParseTransport((string?)req["transport"]);
+        var w = req["width"]?.GetValue<int>() ?? 1920;
+        var h = req["height"]?.GetValue<int>() ?? 1080;
+        var alpha = req["alpha"] is null
+            ? (layer == Layer.Overlay ? AlphaMode.Premultiplied : AlphaMode.Opaque)
+            : ProtocolText.ParseAlpha((string?)req["alpha"]);
+        var api = (string?)req["api"] ?? transport.ToWire();
+
         await _gate.WaitAsync();
         try
         {
-            await RevokeExternalLocked();
-            _source?.Pause(); // keep it around so we can go back when the external app leaves
-            var session = new ExternalSession(_nextWriter++, name, pipe);
-            _external = session;
-            _channel.ActiveWriter = session.Writer;
-            await _host.SendAsync(new JsonObject { ["cmd"] = "hide" }); // drop the old frame...
-            await _host.SendAsync(new JsonObject { ["cmd"] = "show" }); // ...and show the first external one
-            Log.Write($"External output '{name}' took over (writer {session.Writer})");
-            return (JsonPipe.Ok(new JsonObject
+            var r = await Host(new JsonObject
             {
-                ["writer"] = session.Writer,
-                ["protocol"] = Names.ProtocolVersion,
-                ["frameMap"] = Names.FrameMap,
-                ["frameReadyEvent"] = Names.FrameReadyEvent,
-                ["maxWidth"] = FrameChannel.MaxWidth,
-                ["maxHeight"] = FrameChannel.MaxHeight,
-            }), session);
+                ["cmd"] = "session.create", ["layer"] = layer.ToWire(), ["transport"] = transport.ToWire(),
+                ["width"] = w, ["height"] = h, ["alpha"] = alpha.ToWire(), ["pid"] = clientPid,
+            });
+            var descriptor = (JsonObject)r["session"]!;
+            var session = new ExternalSession(descriptor["id"]!.GetValue<int>(), layer, name, transport, api, w, h, pipe);
+
+            await RevokeExternalLocked(layer, restore: false); // last one wins
+            if (layer == Layer.Desktop) _source?.Pause();      // keep it, so we can go back when the renderer leaves
+            _external[(int)layer] = session;
+            await Host(new JsonObject { ["cmd"] = "session.activate", ["id"] = session.Id });
+            Log.Write($"'{name}' took the {layer.ToWire()} layer: {transport.ToWire()}/{api} {w}x{h} (session {session.Id}, pid {clientPid})");
+            return (JsonPipe.Ok(new JsonObject { ["protocol"] = Names.ProtocolVersion, ["session"] = descriptor.DeepClone() }), session);
         }
         finally { _gate.Release(); }
     }
 
-    /// <summary>Another wallpaper was chosen: tell the external app it lost the wallpaper.</summary>
-    private async Task RevokeExternalLocked()
+    /// <summary>Someone else took the layer (or it was stopped): tell the renderer and drop its session.</summary>
+    private async Task RevokeExternalLocked(Layer layer, bool restore)
     {
-        if (_external is not { } ext) return;
-        _external = null;
-        Log.Write($"External output '{ext.Name}' revoked");
+        if (_external[(int)layer] is not { } ext) return;
+        _external[(int)layer] = null;
+        Log.Write($"'{ext.Name}' revoked from the {layer.ToWire()} layer");
         try { await ext.Pipe.SendAsync(new JsonObject { ["event"] = "external.ended" }); } catch { }
+        try { await Host(new JsonObject { ["cmd"] = "session.destroy", ["id"] = ext.Id }); } catch { }
+        if (restore) await RestoreDesktopSourceLocked();
     }
 
-    private async Task EndExternalAsync(ExternalSession session, bool restorePrevious)
+    private async Task EndExternalAsync(ExternalSession session)
     {
         await _gate.WaitAsync();
         try
         {
-            if (_external != session) return; // already revoked
-            _external = null;
-            Log.Write($"External output '{session.Name}' disconnected");
-            if (restorePrevious && _source is not null)
+            if (_external[(int)session.Layer] != session) // already revoked; just make sure its resources are gone
             {
-                _channel.ActiveWriter = FrameSink.DaemonWriter;
-                await _host.SendAsync(new JsonObject { ["cmd"] = "hide" });
-                await _host.SendAsync(new JsonObject { ["cmd"] = "show" });
-                if (!_paused) _source.Resume();
-                _source.Republish();
+                try { await Host(new JsonObject { ["cmd"] = "session.destroy", ["id"] = session.Id }); } catch { }
+                return;
             }
-            else
-            {
-                _channel.ActiveWriter = 0;
-                await _host.SendAsync(new JsonObject { ["cmd"] = "hide" });
-            }
+            Log.Write($"'{session.Name}' disconnected from the {session.Layer.ToWire()} layer");
+            await RevokeExternalLocked(session.Layer, restore: session.Layer == Layer.Desktop);
         }
         finally { _gate.Release(); }
+    }
+
+    /// <summary>Put the daemon's own wallpaper back on the desktop layer after an external renderer.</summary>
+    private async Task RestoreDesktopSourceLocked()
+    {
+        if (_source is null || _sourceSession == 0) return;
+        await Host(new JsonObject { ["cmd"] = "session.activate", ["id"] = _sourceSession });
+        if (!_paused) _source.Resume();
+        _source.Republish();
     }
 
     // ---------------- state ----------------
 
     private JsonObject Status()
     {
+        var desktopExt = _external[(int)Layer.Desktop];
         var o = new JsonObject
         {
             ["protocol"] = Names.ProtocolVersion,
-            ["state"] = _external is not null ? "external" : _source is null ? "stopped" : _paused ? "paused" : "playing",
+            ["state"] = desktopExt is not null ? "external" : _source is null ? "stopped" : _paused ? "paused" : "playing",
             ["fit"] = _fit,
             ["sampling"] = _sampling,
             ["error"] = _lastError,
@@ -294,9 +341,16 @@ internal sealed class Daemon : IDisposable
                 ["width"] = s.Width, ["height"] = s.Height, ["frames"] = s.FrameCount,
             };
         }
-        if (_external is { } e) o["external"] = new JsonObject { ["name"] = e.Name, ["writer"] = e.Writer };
+        if (desktopExt is { } d) o["external"] = Describe(d);
+        if (_external[(int)Layer.Overlay] is { } ov) o["overlay"] = Describe(ov);
         return JsonPipe.Ok(o);
     }
+
+    private static JsonObject Describe(ExternalSession e) => new()
+    {
+        ["name"] = e.Name, ["session"] = e.Id, ["transport"] = e.Transport.ToWire(), ["api"] = e.Api,
+        ["width"] = e.Width, ["height"] = e.Height,
+    };
 
     private async Task SaveAsync()
     {
@@ -314,36 +368,55 @@ internal sealed class Daemon : IDisposable
     {
         try
         {
-            if (!File.Exists(StatePath)) { await _host.SendAsync(new JsonObject { ["cmd"] = "status" }); return; }
-            var o = JsonNode.Parse(await File.ReadAllTextAsync(StatePath)) as JsonObject;
+            var o = File.Exists(StatePath) ? JsonNode.Parse(await File.ReadAllTextAsync(StatePath)) as JsonObject : null;
             _fit = (string?)o?["fit"] ?? "fill";
             _sampling = (string?)o?["sampling"] ?? "smooth";
             _paused = o?["paused"]?.GetValue<bool>() ?? false;
+            await Host(new JsonObject { ["cmd"] = "fit", ["mode"] = _fit }); // also starts the host
+            await Host(new JsonObject { ["cmd"] = "sampling", ["mode"] = _sampling });
             if (o?["source"] is JsonObject s)
             {
                 await _gate.WaitAsync();
                 try { await SetSourceLocked((string)s["kind"]!, (string)s["path"]!, s["fps"]?.GetValue<double>() ?? 0); }
                 finally { _gate.Release(); }
             }
-            else await _host.SendAsync(new JsonObject { ["cmd"] = "status" }); // make sure the host is up
         }
         catch (Exception ex) { Log.Write("Restore failed: " + ex.Message); }
     }
 
+    /// <summary>A new host knows nothing: external sessions are gone, and our own needs recreating.</summary>
     private async Task OnHostReconnected()
     {
-        // A fresh host knows nothing: replay fit/show and the current frame.
-        if (_source is null && _external is null) return;
-        await _host.SendAsync(new JsonObject { ["cmd"] = "fit", ["mode"] = _fit });
-        await _host.SendAsync(new JsonObject { ["cmd"] = "sampling", ["mode"] = _sampling });
-        await _host.SendAsync(new JsonObject { ["cmd"] = "show" });
-        if (_external is null) _source?.Republish(); else _channel.FrameReady.Set();
+        await _gate.WaitAsync();
+        try
+        {
+            Log.Write("Host restarted; restoring state");
+            foreach (var layer in new[] { Layer.Overlay, Layer.Desktop })
+                if (_external[(int)layer] is { } ext)
+                {
+                    _external[(int)layer] = null;
+                    try { await ext.Pipe.SendAsync(new JsonObject { ["event"] = "external.ended" }); } catch { }
+                }
+            await Host(new JsonObject { ["cmd"] = "fit", ["mode"] = _fit });
+            await Host(new JsonObject { ["cmd"] = "sampling", ["mode"] = _sampling });
+            if (_source is { } src)
+            {
+                var (session, map) = await CreateOwnSessionAsync(src.Width, src.Height);
+                _sink.Attach(map);
+                _sourceMap?.Dispose();
+                _sourceSession = session; _sourceMap = map;
+                src.Republish();
+                await Host(new JsonObject { ["cmd"] = "session.activate", ["id"] = session });
+            }
+        }
+        catch (Exception ex) { Log.Write("Restore after host restart failed: " + ex.Message); }
+        finally { _gate.Release(); }
     }
 
     public void Dispose()
     {
         _source?.Dispose();
+        _sourceMap?.Dispose();
         _host.Dispose();
-        _channel.Dispose();
     }
 }

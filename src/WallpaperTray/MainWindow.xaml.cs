@@ -26,6 +26,7 @@ public partial class MainWindow : Window
         _updating = true;   // XAML pre-selects items, which would otherwise fire handlers and
         InitializeComponent(); // overwrite the daemon's saved fit/sampling on every launch
         _updating = false;
+        PipeName.Text = @"\\.\pipe\" + WallpaperProtocol.Names.DaemonPipe;
         var icon = Visuals.WindowIcon();
         Icon = icon;
         AppIcon.Source = icon;
@@ -116,6 +117,15 @@ public partial class MainWindow : Window
 
             PauseButton.IsEnabled = _state is "playing" or "paused";
             StopButton.IsEnabled = _state is "playing" or "paused" or "external";
+
+            if (s?["overlay"] is JsonObject ov)
+            {
+                OverlayCard.Visibility = Visibility.Visible;
+                OverlayTitle.Text = (string?)ov["name"] ?? "Overlay";
+                var via = (string?)ov["api"] == (string?)ov["transport"] ? $"{ov["transport"]}" : $"{ov["transport"]} · {ov["api"]}";
+                OverlayDetail.Text = $"Overlay · {via} · {ov["width"]}×{ov["height"]}";
+            }
+            else OverlayCard.Visibility = Visibility.Collapsed;
             PauseGlyph.Text = _state == "paused" ? "\uE768" : "\uE769";
             PauseButton.ToolTip = _state == "paused" ? "Resume" : "Pause";
 
@@ -228,6 +238,9 @@ public partial class MainWindow : Window
         if (_updating || SamplingBox?.SelectedItem is not ComboBoxItem item) return;
         await RunAsync(() => DaemonClient.SendAsync("sampling", o => o["mode"] = (string)item.Tag));
     }
+
+    private async void OnStopOverlayClick(object sender, RoutedEventArgs e) =>
+        await RunAsync(() => DaemonClient.SendAsync("overlay.stop"));
 
     private async void OnPauseClick(object sender, RoutedEventArgs e) =>
         await RunAsync(() => DaemonClient.SendAsync(_state == "paused" ? "resume" : "pause"));
