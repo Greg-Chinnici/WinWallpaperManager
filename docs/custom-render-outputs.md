@@ -221,7 +221,7 @@ Every response has `"ok"`, plus `"error"` when false. State-changing commands an
 | Request | Effect |
 |---|---|
 | `{"cmd":"status"}` | `state` (desktop) = `playing` / `paused` / `stopped` / `external`; `source`; `external` and `overlay` = owner name, session, transport, api, size |
-| `{"cmd":"set","path":"C:\\a.gif","kind":"gif","fps":12}` | Play a file on the desktop layer. `kind` = `image` / `gif` / `video` (default: by extension). `fps` 0 = the file's own timing |
+| `{"cmd":"set","path":"C:\\a.gif","kind":"gif","fps":12}` | Play a file on the desktop layer. `kind` = `image` / `gif` / `video` (default: by extension). `fps` 0 = the file's own timing. Video decodes on the GPU, falling back to the CPU; `"decode":"cpu"` forces the CPU path |
 | `{"cmd":"fps","fps":24}` | Change the frame rate of the current GIF/video |
 | `{"cmd":"fit","mode":"fill"}` | `fill` / `fit` / `stretch` / `center` |
 | `{"cmd":"sampling","mode":"smooth"}` | `smooth` (bilinear) / `pixelated` (nearest neighbour) |

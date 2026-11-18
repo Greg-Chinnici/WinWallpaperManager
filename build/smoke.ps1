@@ -58,7 +58,7 @@ try {
     Check "gif" ($r.ok -and $r.source.frames -eq 20 -and $r.source.fps -eq 12) "$($r.error)"
 
     $r = Request @{ cmd = "set"; path = (Join-Path $media "test.mp4") }
-    if ($r.ok) { Check "video" ($r.source.width -eq 1280 -and $r.source.nativeFps -eq 30) }
+    if ($r.ok) { Check "video ($($r.source.decode) decode)" ($r.source.width -eq 1280 -and $r.source.nativeFps -eq 30) }
     else { Write-Host "SKIP  video ($($r.error)) - Media Foundation missing? (normal on Windows Server)" -ForegroundColor Yellow }
 
     foreach ($c in @(@{ cmd = "fit"; mode = "fit" }, @{ cmd = "sampling"; mode = "pixelated" }, @{ cmd = "pause" }, @{ cmd = "resume" })) {
@@ -93,6 +93,13 @@ try {
         if ($out -match "Rendered (\d+) frames") { Check "gpu $api" ([int]$Matches[1] -gt 30) "($($Matches[1]) frames in 3s)" }
         else { Write-Host "SKIP  gpu $api ($(($out -split "`n" | Where-Object { $_ -match 'Exception|failed' } | Select-Object -First 1).Trim()))" -ForegroundColor Yellow }
     }
+
+    # The daemon watches the host process: kill it and the wallpaper must come back by itself.
+    $before = (Request @{ cmd = "status" }).state
+    Get-Process WallpaperHost -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep 4
+    $r = Request @{ cmd = "status" }
+    Check "host restarted after a crash" ([bool](Get-Process WallpaperHost -ErrorAction SilentlyContinue) -and $r.state -eq $before) "(state=$($r.state))"
 
     $r = Request @{ cmd = "stop" }
     Check "stop" ($r.ok -and $r.state -eq "stopped")

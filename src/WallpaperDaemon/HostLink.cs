@@ -11,6 +11,9 @@ internal sealed class HostLink : IDisposable
     private JsonPipe? _pipe;
     private bool _everConnected;
 
+    /// <summary>Raised when the host process exits (crash, kill, or a quit we sent).</summary>
+    public event Action? HostExited;
+
     /// <summary>Raised after reconnecting to a (new) host, which has lost every session.</summary>
     public event Func<Task>? Reconnected;
 
@@ -30,6 +33,7 @@ internal sealed class HostLink : IDisposable
                         _pipe = await ConnectOrStartAsync();
                         reconnected = _everConnected; // only a *re*connect means the host lost its sessions
                         _everConnected = true;
+                        WatchHost(_pipe.ServerProcessId);
                     }
                     return await _pipe.RequestAsync(msg);
                 }
@@ -48,10 +52,28 @@ internal sealed class HostLink : IDisposable
         }
     }
 
+    /// <summary>Event-driven: wait on the host process handle rather than noticing on the next command.</summary>
+    private void WatchHost(int pid)
+    {
+        if (pid == 0) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var p = System.Diagnostics.Process.GetProcessById(pid);
+                await p.WaitForExitAsync();
+            }
+            catch (ArgumentException) { /* already gone */ }
+            Log.Write($"Host (pid {pid}) exited");
+            HostExited?.Invoke();
+        });
+    }
+
     private static async Task<JsonPipe> ConnectOrStartAsync()
     {
         try { return await JsonPipe.ConnectAsync(Names.HostPipe, 300); }
-        catch (TimeoutException) { }
+        // No host (timeout), or a dying host's pipe that's already broken (IOException): start a fresh one.
+        catch (Exception ex) when (ex is TimeoutException or IOException) { }
 
         var exe = Path.Combine(AppContext.BaseDirectory, "WallpaperHost.exe");
         Log.Write("Starting " + exe);

@@ -207,8 +207,7 @@ v1 had one global frame ring, and the daemon handed out "writer tokens". v2 repl
   premultiplied-alpha DirectComposition visual. Verified: drawn above windows and the taskbar,
   and clicks go to the window underneath.
 
-Not yet: GPU frames for the daemon's own video (it still decodes on the CPU), a producer
-restart reusing its session, AppContainer/elevated producers (handle duplication needs
+Not yet: a producer restart reusing its session, AppContainer/elevated producers (handle duplication needs
 `PROCESS_DUP_HANDLE` on them), and per-monitor content.
 
 ## POC status (2026-11-16)
@@ -233,14 +232,40 @@ Measured (Debug builds):
 | Stopped or static image | 0 | 0 |
 | Paused video | 0 | 0 |
 | External renderer, 1280×720 @ 30 | 0 % | ~5 % |
-| Video 1280×720 @ 30 (software decode) | **~31 %** | ~4 % |
+| Video 1280×720 @ 30, CPU decode (fallback) | ~34 % | ~4 % |
+| Video 1920×1080 @ 30, CPU decode (fallback) | ~75 % | ~6 % |
+| Video 1280×720 @ 30, **GPU decode** | **~3 %** | ~4 % |
+| Video 1920×1080 @ 30, **GPU decode** | **~2.5 %** | ~2.5 % |
 
 Scaling stays on DWM's GPU composition; the host never resamples pixels itself. If big
 downscales (e.g. 4K video on 1080p) visibly shimmer, add a mip/shader downscale pass in
 the host for that case only.
 
-Next: hardware video decode. Give the MF source reader a DXGI device manager and ship
-frames as fence-synchronised GPU textures, so video costs about what the external path does.
+### GPU video decode (2026-11-17)
+
+The daemon's own video now decodes on the GPU and uses the same GPU session transport as
+external renderers:
+
+- One shared D3D11 device on the **host's adapter** (LUID from host `status`), with
+  `VIDEO_SUPPORT` and multithread protection, wrapped in an `IMFDXGIDeviceManager`.
+- The source reader gets that manager (`MF_SOURCE_READER_D3D_MANAGER`) plus advanced video
+  processing, and is asked for **ARGB32** (= `DXGI_FORMAT_B8G8R8A8_UNORM`, the session texture
+  format). DXVA decodes and MF's video processor converts to BGRA, both on the GPU.
+- Each sample's `IMFDXGIBuffer` texture (one array slice) is `CopySubresourceRegion`'d into the
+  session's slot texture, the produced fence is signalled, and the frame is published. Pixels
+  never touch system memory.
+- `Prepare()` decodes one real frame to prove the path works (and that it returns GPU textures),
+  then rewinds. Any failure falls back to CPU decode, so a codec or driver problem never breaks
+  the wallpaper. `set` accepts `"decode":"cpu"` to force the fallback. `status` reports `decode`.
+- Both paths crop to `MF_MT_MINIMUM_DISPLAY_APERTURE` (1080p H.264 is stored as 1088 rows).
+
+Fixed along the way:
+- **The host spun a CPU core**, because an overlay (layered) window got ~150k `WM_PAINT`/s when
+  answered with `ValidateRect`. It's now answered with `BeginPaint`/`EndPaint`.
+- **The daemon now watches the host process.** If the host dies, a new one is started within
+  ~1 s and the wallpaper is restored. Session object names include the host PID so the new
+  host never collides with maps a producer still holds.
+- `JsonPipe.Dispose` no longer throws on a broken pipe.
 
 ## Frame API
 

@@ -5,9 +5,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <!-- All executables land side by side so the tray can find the daemon and the daemon the host. -->
+    <!-- All executables land side by side so the tray can find the daemon and the daemon the host.
+         RID-specific builds (publish) keep their default win-x64 subfolder so self-contained runtime
+         files never mix with these framework-dependent exes. -->
     <OutputPath>$(MSBuildThisFileDirectory)..\artifacts\bin\$(Configuration)\</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
   </PropertyGroup>
 </Project>

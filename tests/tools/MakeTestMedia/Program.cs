@@ -2,6 +2,7 @@
 //   MakeTestMedia <outDir>
 //     test.gif  320x180, 20 frames, 10 fps (100 ms delays), red band at the top
 //     test.mp4  1280x720 H.264, 30 fps, 6 s, red band at the top, moving bar + frame counter
+//     test1080.mp4  same at 1920x1080 (H.264 pads it to 1088 rows)
 // The red band makes upside-down output obvious in screenshots.
 
 using Vortice.MediaFoundation;
@@ -9,7 +10,8 @@ using Vortice.MediaFoundation;
 var outDir = args.Length > 0 ? args[0] : ".";
 Directory.CreateDirectory(outDir);
 Gif.Write(Path.Combine(outDir, "test.gif"));
-Mp4.Write(Path.Combine(outDir, "test.mp4"));
+Mp4.Write(Path.Combine(outDir, "test.mp4"), 1280, 720);
+Mp4.Write(Path.Combine(outDir, "test1080.mp4"), 1920, 1080); // stored as 1088 rows: exercises display-aperture cropping
 Console.WriteLine("wrote test.gif and test.mp4 to " + Path.GetFullPath(outDir));
 
 static class Pattern
@@ -83,9 +85,9 @@ static class Gif
 
 static unsafe class Mp4
 {
-    public static void Write(string path)
+    public static void Write(string path, int w, int h)
     {
-        const int w = 1280, h = 720, fps = 30, seconds = 6, frames = fps * seconds;
+        const int fps = 30, seconds = 6, frames = fps * seconds;
         if (File.Exists(path)) File.Delete(path);
         MediaFactory.MFStartup(true);
         try
@@ -96,7 +98,7 @@ static unsafe class Mp4
             outType.Set(MediaTypeAttributeKeys.Subtype, new Guid("34363248-0000-0010-8000-00AA00389B71") /* MFVideoFormat_H264 */);
             outType.Set(MediaTypeAttributeKeys.AvgBitrate, 4_000_000u);
             outType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u /* progressive */);
-            outType.Set(MediaTypeAttributeKeys.FrameSize, ((ulong)w << 32) | h);
+            outType.Set(MediaTypeAttributeKeys.FrameSize, ((ulong)w << 32) | (uint)h);
             outType.Set(MediaTypeAttributeKeys.FrameRate, ((ulong)fps << 32) | 1);
             outType.Set(MediaTypeAttributeKeys.PixelAspectRatio, (1UL << 32) | 1);
             var stream = writer.AddStream(outType);
@@ -105,7 +107,7 @@ static unsafe class Mp4
             inType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
             inType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.Rgb32);
             inType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u);
-            inType.Set(MediaTypeAttributeKeys.FrameSize, ((ulong)w << 32) | h);
+            inType.Set(MediaTypeAttributeKeys.FrameSize, ((ulong)w << 32) | (uint)h);
             inType.Set(MediaTypeAttributeKeys.FrameRate, ((ulong)fps << 32) | 1);
             inType.Set(MediaTypeAttributeKeys.PixelAspectRatio, (1UL << 32) | 1);
             inType.Set(MediaTypeAttributeKeys.DefaultStride, (uint)(w * 4)); // positive = top-down
