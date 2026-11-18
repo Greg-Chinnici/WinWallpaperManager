@@ -63,6 +63,11 @@ internal abstract class Source : IDisposable
     public abstract void Prepare();
     /// <summary>Start publishing into <paramref name="sink"/> (sized Width x Height).</summary>
     public abstract void Start(FrameSink sink);
+    /// <summary>True if <see cref="Prepare"/> chose a GPU path: start it with <see cref="StartGpu"/> on a GPU session.</summary>
+    public virtual bool UsesGpu => false;
+    public virtual void StartGpu(GpuSink sink) => throw new NotSupportedException();
+    /// <summary>"gpu" or "cpu": where frames are decoded/produced.</summary>
+    public virtual string Decode => "cpu";
     public virtual void SetFps(double fps) => Fps = fps;
     public virtual void Pause() { }
     public virtual void Resume() { }

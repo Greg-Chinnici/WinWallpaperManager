@@ -24,6 +24,12 @@ public sealed class JsonPipe : IDisposable
 
     public bool IsConnected => _pipe.IsConnected;
 
+    [System.Runtime.InteropServices.DllImport("kernel32")]
+    private static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint pid);
+
+    /// <summary>Client side: process ID of the pipe server (reported by the kernel), or 0.</summary>
+    public int ServerProcessId => GetNamedPipeServerProcessId(_pipe.SafePipeHandle, out var pid) ? (int)pid : 0;
+
     public static async Task<JsonPipe> ConnectAsync(string pipeName, int timeoutMs, CancellationToken ct = default)
     {
         var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
@@ -66,10 +72,11 @@ public sealed class JsonPipe : IDisposable
 
     public static JsonObject Error(string message) => new() { ["ok"] = false, ["error"] = message };
 
+    /// <summary>Never throws: disposing the writer flushes, which fails on a pipe the other side already closed.</summary>
     public void Dispose()
     {
-        _reader.Dispose();
-        _writer.Dispose();
-        _pipe.Dispose();
+        try { _writer.Dispose(); } catch (IOException) { } catch (ObjectDisposedException) { }
+        try { _reader.Dispose(); } catch (IOException) { }
+        try { _pipe.Dispose(); } catch (IOException) { }
     }
 }

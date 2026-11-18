@@ -51,11 +51,25 @@ internal sealed class HostApp
         Register("WinWallpaperHostWindow", _wallProc, inst);
         // Hidden top-level window: message-only windows don't receive the TaskbarCreated broadcast.
         _control = CreateWindowEx(WS_EX_TOOLWINDOW, "WinWallpaperHostControl", "WinWallpaper host", WS_POPUP, 0, 0, 0, 0, 0, 0, inst, 0);
-        Log.Write($"WallpaperHost started (pid {Environment.ProcessId})");
+        Log.Write($"WallpaperHost started (pid {Environment.ProcessId}, window thread {GetCurrentThreadId()})");
 
         _ = Task.Run(PipeServerLoop);
         PostMessage(_control, WM_APP_ATTACH, 0, 0);
-        while (GetMessage(out var msg, 0, 0, 0) > 0) { TranslateMessage(ref msg); DispatchMessage(ref msg); }
+        var diag = Environment.GetEnvironmentVariable("WINWALLPAPER_MSGSTATS") == "1";
+        var counts = new Dictionary<(uint, nint), int>(); var lastDump = Environment.TickCount64;
+        while (GetMessage(out var msg, 0, 0, 0) > 0)
+        {
+            if (diag)
+            {
+                var key = (msg.message, msg.hwnd); counts[key] = counts.GetValueOrDefault(key) + 1;
+                if (Environment.TickCount64 - lastDump > 3000)
+                {
+                    Log.Write("msgstats: " + string.Join(", ", counts.OrderByDescending(kv => kv.Value).Take(5).Select(kv => $"0x{kv.Key.Item1:X}@{Hex(kv.Key.Item2)}={kv.Value}")));
+                    counts.Clear(); lastDump = Environment.TickCount64;
+                }
+            }
+            TranslateMessage(ref msg); DispatchMessage(ref msg);
+        }
         Log.Write("WallpaperHost exiting");
         return 0;
     }
@@ -215,9 +229,21 @@ internal sealed class HostApp
     {
         WM_NCHITTEST => HTTRANSPARENT,
         WM_ERASEBKGND => 1,
-        WM_PAINT => ValidateRect(hwnd, 0) ? 0 : 0,
+        WM_PAINT => Paint(hwnd),
         _ => DefWindowProc(hwnd, msg, w, l),
     };
+
+    /// <summary>
+    /// Nothing to draw (DirectComposition supplies the content), but WM_PAINT must still be answered
+    /// with BeginPaint/EndPaint: ValidateRect alone left an overlay (layered) window with a permanent
+    /// update region, and Windows re-sent WM_PAINT ~150,000 times a second.
+    /// </summary>
+    private static nint Paint(nint hwnd)
+    {
+        BeginPaint(hwnd, out var ps);
+        EndPaint(hwnd, ref ps);
+        return 0;
+    }
 
     private void Shutdown()
     {

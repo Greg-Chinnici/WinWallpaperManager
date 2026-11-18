@@ -197,7 +197,7 @@ Untagged CI builds are versioned `0.1.<run number>`.
 | Images, GIFs, video, scaling, sampling, pause/stop | Working |
 | Custom renderers: desktop + overlay layers, CPU + GPU (D3D11 / D3D12 / Vulkan) | Working, protocol v2 |
 | Multi-monitor | Same wallpaper on all monitors. **Per-monitor wallpapers not yet** |
-| Video decoding | Software decode, ~30 % of a core for 720p30. **GPU decode is next** |
+| Video decoding | Hardware (GPU) decode: ~3 % of a core for 1080p30. CPU decode fallback (~75 %) when the GPU path isn't available |
 | Events (lock, idle, game launched…) | Not started |
 | Per-user MSI, auto-start at sign-in, CI, tagged pre-releases | Working. **Not code-signed yet** |
 | Windows 11 23H2 and older, mixed-DPI monitors, monitor hot-plug | Code paths exist but are untested |

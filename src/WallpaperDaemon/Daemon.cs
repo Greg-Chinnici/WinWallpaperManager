@@ -28,6 +28,10 @@ internal sealed class Daemon : IDisposable
     private Source? _source;
     private int _sourceSession;
     private SessionMap? _sourceMap;
+    private GpuSink? _sourceGpuSink;          // set when the source decodes on the GPU
+    private VideoGpu? _videoGpu;               // shared D3D11 decode device on the host's GPU
+    private bool _videoGpuFailed;
+    private string _decode = "auto";           // "auto" (GPU, CPU fallback) | "cpu"
     private bool _paused;
     private string _fit = "fill", _sampling = "smooth", _lastError = "";
 
@@ -36,7 +40,21 @@ internal sealed class Daemon : IDisposable
 
     private sealed record ExternalSession(int Id, Layer Layer, string Name, Transport Transport, string Api, int Width, int Height, JsonPipe Pipe);
 
-    public Daemon() => _host.Reconnected += OnHostReconnected;
+    public Daemon()
+    {
+        _host.Reconnected += OnHostReconnected;
+        // If the host dies (crash, Task Manager), bring it straight back: reconnecting starts a new host
+        // and raises Reconnected, which restores the wallpaper. Not when we're the ones shutting it down.
+        _host.HostExited += () => _ = Task.Run(async () =>
+        {
+            if (_quit.IsCancellationRequested || _shuttingDown) return;
+            await Task.Delay(500);
+            try { await _host.SendAsync(new JsonObject { ["cmd"] = "status" }); }
+            catch (Exception ex) { Log.Write("Couldn't restart the host: " + ex.Message); }
+        });
+    }
+
+    private volatile bool _shuttingDown;
 
     public async Task RunAsync()
     {
@@ -126,6 +144,7 @@ internal sealed class Daemon : IDisposable
                 {
                     var path = (string?)req["path"] ?? throw new ArgumentException("path is required");
                     var kind = (string?)req["kind"] ?? KindFromExtension(path);
+                    if (req["decode"] is { } dec) _decode = (string?)dec == "cpu" ? "cpu" : "auto";
                     await SetSourceLocked(kind, path, req["fps"]?.GetValue<double>() ?? 0);
                     await SaveAsync();
                     return Status();
@@ -165,6 +184,7 @@ internal sealed class Daemon : IDisposable
                     await RevokeExternalLocked(Layer.Overlay, restore: false);
                     return Status();
                 case "quit":
+                    _shuttingDown = true;
                     await RevokeExternalLocked(Layer.Overlay, restore: false);
                     await RevokeExternalLocked(Layer.Desktop, restore: false);
                     await StopSourceLocked();
@@ -190,23 +210,28 @@ internal sealed class Daemon : IDisposable
     private async Task SetSourceLocked(string kind, string path, double fps)
     {
         if (!File.Exists(path)) throw new FileNotFoundException("File not found", path);
+        var gpu = kind == "video" && _decode != "cpu" ? await GetVideoGpuAsync() : null;
         Source source = kind switch
         {
             "image" => new ImageSource(path),
             "gif" => new GifSource(path, fps),
-            "video" => new VideoSource(path, fps),
+            "video" => new VideoSource(path, fps, () => gpu),
             _ => throw new ArgumentException($"unknown kind '{kind}'"),
         };
         int session = 0;
         SessionMap? map = null;
+        GpuSink? gpuSink = null;
         try
         {
             source.Prepare(); // decode/open first: a bad file fails here, with the old wallpaper untouched
-            (session, map) = await CreateOwnSessionAsync(source.Width, source.Height);
+            SessionDescriptor d;
+            (d, map) = await CreateOwnSessionAsync(source.Width, source.Height, source.UsesGpu);
+            session = d.Id;
+            if (source.UsesGpu) gpuSink = new GpuSink(map, d.Gpu!, gpu!.Device);
         }
         catch (Exception ex)
         {
-            source.Dispose(); map?.Dispose();
+            source.Dispose(); gpuSink?.Dispose(); map?.Dispose();
             if (session != 0) try { await Host(new JsonObject { ["cmd"] = "session.destroy", ["id"] = session }); } catch { }
             _lastError = $"{Path.GetFileName(path)}: {ex.Message}";
             Log.Write("Source failed: " + ex);
@@ -215,28 +240,46 @@ internal sealed class Daemon : IDisposable
 
         // Switch over: new source starts in its own session, then the old one goes away (no flash).
         await RevokeExternalLocked(Layer.Desktop, restore: false);
-        var (oldSource, oldSession, oldMap) = (_source, _sourceSession, _sourceMap);
+        var (oldSource, oldSession, oldMap, oldGpuSink) = (_source, _sourceSession, _sourceMap, _sourceGpuSink);
         oldSource?.Dispose();
-        _sink.Attach(map);
-        _source = source; _sourceSession = session; _sourceMap = map;
-        source.Start(_sink);
+        _sink.Attach(source.UsesGpu ? null : map);
+        _source = source; _sourceSession = session; _sourceMap = map; _sourceGpuSink = gpuSink;
+        if (gpuSink is not null) source.StartGpu(gpuSink); else source.Start(_sink);
         if (_paused) source.Pause();
         await Host(new JsonObject { ["cmd"] = "session.activate", ["id"] = session });
         if (oldSession != 0) await Host(new JsonObject { ["cmd"] = "session.destroy", ["id"] = oldSession });
+        oldGpuSink?.Dispose();
         oldMap?.Dispose();
         _lastError = "";
-        Log.Write($"Now playing {kind} {path} ({source.Width}x{source.Height}, fps={(fps > 0 ? fps : "native")}, session {session})");
+        Log.Write($"Now playing {kind} {path} ({source.Width}x{source.Height}, fps={(fps > 0 ? fps : "native")}, {source.Decode} decode, session {session})");
     }
 
-    private async Task<(int, SessionMap)> CreateOwnSessionAsync(int w, int h)
+    /// <summary>The shared GPU decode device, created once on the host's adapter. Null if it can't be made.</summary>
+    private async Task<VideoGpu?> GetVideoGpuAsync()
+    {
+        if (_videoGpu is not null || _videoGpuFailed) return _videoGpu;
+        try
+        {
+            var status = await Host(new JsonObject { ["cmd"] = "status" });
+            _videoGpu = VideoGpu.Create(long.Parse((string)status["adapterLuid"]!));
+        }
+        catch (Exception ex)
+        {
+            _videoGpuFailed = true; // don't retry on every video; CPU decode still works
+            Log.Write("GPU video decode disabled: " + ex.Message);
+        }
+        return _videoGpu;
+    }
+
+    private async Task<(SessionDescriptor, SessionMap)> CreateOwnSessionAsync(int w, int h, bool gpu)
     {
         var r = await Host(new JsonObject
         {
-            ["cmd"] = "session.create", ["layer"] = "desktop", ["transport"] = "cpu",
+            ["cmd"] = "session.create", ["layer"] = "desktop", ["transport"] = gpu ? "gpu" : "cpu",
             ["width"] = w, ["height"] = h, ["alpha"] = "opaque", ["pid"] = Environment.ProcessId,
         });
         var d = SessionDescriptor.FromJson((JsonObject)r["session"]!);
-        return (d.Id, SessionMap.Open(d.MapName, d.ReadyEvent));
+        return (d, SessionMap.Open(d.MapName, d.ReadyEvent));
     }
 
     private async Task StopSourceLocked()
@@ -244,6 +287,8 @@ internal sealed class Daemon : IDisposable
         _source?.Dispose();
         _source = null;
         _sink.Attach(null);
+        _sourceGpuSink?.Dispose();
+        _sourceGpuSink = null;
         if (_sourceSession != 0) { try { await Host(new JsonObject { ["cmd"] = "session.destroy", ["id"] = _sourceSession }); } catch { } }
         _sourceMap?.Dispose();
         _sourceSession = 0; _sourceMap = null;
@@ -338,7 +383,7 @@ internal sealed class Daemon : IDisposable
             o["source"] = new JsonObject
             {
                 ["kind"] = s.Kind, ["path"] = s.Path, ["fps"] = s.Fps, ["nativeFps"] = s.NativeFps,
-                ["width"] = s.Width, ["height"] = s.Height, ["frames"] = s.FrameCount,
+                ["width"] = s.Width, ["height"] = s.Height, ["frames"] = s.FrameCount, ["decode"] = s.Decode,
             };
         }
         if (desktopExt is { } d) o["external"] = Describe(d);
@@ -357,7 +402,7 @@ internal sealed class Daemon : IDisposable
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(StatePath)!);
-            var o = new JsonObject { ["fit"] = _fit, ["sampling"] = _sampling, ["paused"] = _paused };
+            var o = new JsonObject { ["fit"] = _fit, ["sampling"] = _sampling, ["paused"] = _paused, ["decode"] = _decode };
             if (_source is { } s) o["source"] = new JsonObject { ["kind"] = s.Kind, ["path"] = s.Path, ["fps"] = s.Fps };
             await File.WriteAllTextAsync(StatePath, o.ToJsonString());
         }
@@ -372,6 +417,7 @@ internal sealed class Daemon : IDisposable
             _fit = (string?)o?["fit"] ?? "fill";
             _sampling = (string?)o?["sampling"] ?? "smooth";
             _paused = o?["paused"]?.GetValue<bool>() ?? false;
+            _decode = (string?)o?["decode"] == "cpu" ? "cpu" : "auto";
             await Host(new JsonObject { ["cmd"] = "fit", ["mode"] = _fit }); // also starts the host
             await Host(new JsonObject { ["cmd"] = "sampling", ["mode"] = _sampling });
             if (o?["source"] is JsonObject s)
@@ -401,12 +447,9 @@ internal sealed class Daemon : IDisposable
             await Host(new JsonObject { ["cmd"] = "sampling", ["mode"] = _sampling });
             if (_source is { } src)
             {
-                var (session, map) = await CreateOwnSessionAsync(src.Width, src.Height);
-                _sink.Attach(map);
-                _sourceMap?.Dispose();
-                _sourceSession = session; _sourceMap = map;
-                src.Republish();
-                await Host(new JsonObject { ["cmd"] = "session.activate", ["id"] = session });
+                // Its session died with the old host: restart the same wallpaper from scratch.
+                _sourceSession = 0;
+                await SetSourceLocked(src.Kind, src.Path, src.Fps);
             }
         }
         catch (Exception ex) { Log.Write("Restore after host restart failed: " + ex.Message); }
@@ -416,7 +459,9 @@ internal sealed class Daemon : IDisposable
     public void Dispose()
     {
         _source?.Dispose();
+        _sourceGpuSink?.Dispose();
         _sourceMap?.Dispose();
+        _videoGpu?.Dispose();
         _host.Dispose();
     }
 }

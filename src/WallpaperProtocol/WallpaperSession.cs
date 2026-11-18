@@ -80,14 +80,10 @@ public sealed class WallpaperSession : IDisposable
     /// GPU transport: the slot to render the next frame into, or -1 if the host still needs it.
     /// <paramref name="consumedFenceValue"/> is the consumed fence's current completed value.
     /// </summary>
-    public int TryBeginGpuFrame(ulong consumedFenceValue)
-    {
-        var seq = Map.NextSeq;
-        return seq < Map.Slots || consumedFenceValue >= (ulong)(seq - Map.Slots + 1) ? Map.NextSlot : -1;
-    }
+    public int TryBeginGpuFrame(ulong consumedFenceValue) => Map.TryBeginGpuFrame(consumedFenceValue);
 
     /// <summary>GPU transport: value to signal on the produced fence once the current frame is rendered.</summary>
-    public ulong ProducedFenceValue => (ulong)Map.NextSeq + 1;
+    public ulong ProducedFenceValue => Map.ProducedFenceValue;
 
     /// <summary>GPU transport: after queueing the produced-fence signal, tell the host the frame exists.</summary>
     public void PublishGpuFrame() => Map.Publish();

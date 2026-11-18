@@ -11,11 +11,15 @@ public static class Names
     /// <summary>Named pipe the daemon uses to control the host (JSON lines).</summary>
     public const string HostPipe = "WinWallpaper.Host.v2";
 
-    /// <summary>Shared-memory control block (and CPU frame slots) of one session.</summary>
-    public static string SessionMap(int session) => $@"Local\WinWallpaper.v2.S{session}.Map";
+    /// <summary>
+    /// Shared-memory control block (and CPU frame slots) of one session. Includes the host's process
+    /// ID so a restarted host never collides with maps a producer still holds from the old one.
+    /// Producers don't build these: they get the exact names in the session descriptor.
+    /// </summary>
+    public static string SessionMap(int hostPid, int session) => $@"Local\WinWallpaper.v2.H{hostPid}.S{session}.Map";
 
     /// <summary>Auto-reset event the producer sets after publishing a frame.</summary>
-    public static string SessionReadyEvent(int session) => $@"Local\WinWallpaper.v2.S{session}.Ready";
+    public static string SessionReadyEvent(int hostPid, int session) => $@"Local\WinWallpaper.v2.H{hostPid}.S{session}.Ready";
 
     public const string DaemonMutex = @"Local\WinWallpaper.Daemon.Instance";
     public const string HostMutex = @"Local\WinWallpaper.Host.Instance";

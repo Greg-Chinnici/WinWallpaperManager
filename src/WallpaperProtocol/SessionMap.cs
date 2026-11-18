@@ -76,9 +76,9 @@ public sealed unsafe class SessionMap : IDisposable
         if (width <= 0 || height <= 0 || width > MaxWidth || height > MaxHeight)
             throw new ArgumentOutOfRangeException(nameof(width), $"Session size {width}x{height} must be within {MaxWidth}x{MaxHeight}");
         var cap = CapacityFor(transport, width, height, slots);
-        var mapName = Names.SessionMap(session);
+        var mapName = Names.SessionMap(Environment.ProcessId, session); // the host creates every map
         var mmf = MemoryMappedFile.CreateNew(mapName, cap, MemoryMappedFileAccess.ReadWrite);
-        var map = new SessionMap(mmf, cap, mapName, Names.SessionReadyEvent(session));
+        var map = new SessionMap(mmf, cap, mapName, Names.SessionReadyEvent(Environment.ProcessId, session));
         *map.H = new Header
         {
             Magic = MagicValue, Version = Names.ProtocolVersion, Transport = (int)transport,
@@ -113,6 +113,19 @@ public sealed unsafe class SessionMap : IDisposable
 
     /// <summary>CPU transport: pointer to the slot for the next frame (rows <see cref="Stride"/> bytes apart).</summary>
     public byte* NextSlotPointer => SlotPointer(NextSlot);
+
+    /// <summary>
+    /// GPU transport: the slot to render the next frame into, or -1 if the host still needs it.
+    /// <paramref name="consumedFenceValue"/> is the consumed fence's current completed value.
+    /// </summary>
+    public int TryBeginGpuFrame(ulong consumedFenceValue)
+    {
+        var seq = _nextSeq;
+        return seq < Slots || consumedFenceValue >= (ulong)(seq - Slots + 1) ? NextSlot : -1;
+    }
+
+    /// <summary>GPU transport: value to signal on the produced fence once the next frame is rendered.</summary>
+    public ulong ProducedFenceValue => (ulong)_nextSeq + 1;
 
     /// <summary>Publish the frame for <see cref="NextSeq"/> (its pixels / GPU signal must already be done) and wake the host.</summary>
     public void Publish()

@@ -142,6 +142,7 @@ internal sealed class Renderer : IDisposable
                 ["transport"] = l.Active?.Map.Transport.ToWire(), ["width"] = l.Active?.Width, ["height"] = l.Active?.Height,
             };
         o["sessions"] = _sessions.Count;
+        o["adapterLuid"] = _adapterLuid.ToString(); // producers (incl. the daemon) create devices on this GPU
         return o;
     });
 
@@ -162,7 +163,7 @@ internal sealed class Renderer : IDisposable
         {
             CreateDevice();
             _ready.SetResult();
-            Log.Write("Renderer ready");
+            Log.Write($"Renderer ready (render thread {Native.GetCurrentThreadId()})");
             while (true)
             {
                 // Event-driven: wait for a command or a frame from either layer's active session.

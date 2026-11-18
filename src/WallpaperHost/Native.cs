@@ -66,6 +66,9 @@ internal static unsafe class Native
     [DllImport("user32")] public static extern nint DispatchMessage(ref MSG m);
     [DllImport("user32")] public static extern void PostQuitMessage(int code);
     [DllImport("user32")] public static extern bool ValidateRect(nint h, nint r);
+    [StructLayout(LayoutKind.Sequential)] public struct PAINTSTRUCT { public nint hdc; public int fErase; public RECT rcPaint; public int fRestore, fIncUpdate; [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)] public byte[] rgbReserved; }
+    [DllImport("user32")] public static extern nint BeginPaint(nint h, out PAINTSTRUCT ps);
+    [DllImport("user32")] public static extern bool EndPaint(nint h, ref PAINTSTRUCT ps);
     [DllImport("user32")] public static extern bool SetLayeredWindowAttributes(nint h, uint key, byte alpha, uint flags);
     [DllImport("user32")] public static extern nint MonitorFromPoint(POINT p, uint flags);
     [DllImport("user32", CharSet = CharSet.Unicode)] public static extern bool GetMonitorInfo(nint mon, ref MONITORINFOEX mi);
