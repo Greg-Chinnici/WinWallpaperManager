@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using Vortice.WIC;
-using WallpaperProtocol;
 
 namespace WallpaperDaemon.Sources;
 
@@ -18,7 +17,7 @@ internal static class Wic
         int w = size.Width, h = size.Height;
         IWICBitmapSource src = frame;
         IWICBitmapScaler? scaler = null;
-        var scale = Math.Min(1.0, Math.Min((double)FrameChannel.MaxWidth / w, (double)FrameChannel.MaxHeight / h));
+        var scale = Math.Min(1.0, Math.Min((double)Limits.MaxWidth / w, (double)Limits.MaxHeight / h));
         if (scale < 1.0)
         {
             w = Math.Max(1, (int)(w * scale)); h = Math.Max(1, (int)(h * scale));
@@ -51,11 +50,15 @@ internal sealed class ImageSource : Source
     public ImageSource(string path) : base(path) { }
     public override string Kind => "image";
 
+    public override void Prepare()
+    {
+        (_pixels, var w, var h) = Wic.DecodeStill(Path);
+        Width = w; Height = h;
+    }
+
     public override void Start(FrameSink sink)
     {
         _sink = sink;
-        (_pixels, var w, var h) = Wic.DecodeStill(Path);
-        Width = w; Height = h;
         Republish();
     }
 
@@ -82,10 +85,11 @@ internal sealed class GifSource : Source
     public GifSource(string path, double fps) : base(path) => Fps = fps;
     public override string Kind => "gif";
 
+    public override void Prepare() => Compose();
+
     public override void Start(FrameSink sink)
     {
         _sink = sink;
-        Compose();
         _thread = new Thread(Play) { IsBackground = true, Name = "gif" };
         _thread.Start();
     }
@@ -101,7 +105,7 @@ internal sealed class GifSource : Source
             h = Wic.MetaInt(gmd, "/logscrdesc/Height", 0);
         }
         if (w <= 0 || h <= 0) { using var f0 = decoder.GetFrame(0); w = f0.Size.Width; h = f0.Size.Height; }
-        if (w > FrameChannel.MaxWidth || h > FrameChannel.MaxHeight) throw new NotSupportedException($"GIF is {w}x{h}; max {FrameChannel.MaxWidth}x{FrameChannel.MaxHeight}");
+        if (w > Limits.MaxWidth || h > Limits.MaxHeight) throw new NotSupportedException($"GIF is {w}x{h}; max {Limits.MaxWidth}x{Limits.MaxHeight}");
         if ((long)w * h * 4 * count > MaxComposedBytes) throw new NotSupportedException($"GIF too large to pre-compose ({count} frames at {w}x{h})");
         Width = w; Height = h;
 

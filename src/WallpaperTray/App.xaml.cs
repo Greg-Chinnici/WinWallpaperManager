@@ -77,6 +77,8 @@ public partial class App : Application
                 () => _ = Send(state == "paused" ? "resume" : "pause")));
         if (state is "playing" or "paused" or "external")
             menu.Items.Add(Item("Stop live wallpaper", "\uE71A", () => _ = Send("stop")));
+        if (status?["overlay"] is System.Text.Json.Nodes.JsonObject ov)
+            menu.Items.Add(Item($"Remove overlay ({ov["name"]})", char.ConvertFromUtf32(0xE711), () => _ = Send("overlay.stop")));
         menu.Items.Add(new Separator());
         menu.Items.Add(Item("Close tray icon", "\uE711", ExitTray));
         menu.Items.Add(Item("Quit WinWallpaper", "\uE7E8", () => _ = QuitAll()));

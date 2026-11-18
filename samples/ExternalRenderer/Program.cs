@@ -17,9 +17,9 @@ Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
 if (seconds > 0) stop.CancelAfter(TimeSpan.FromSeconds(seconds));
 
 // 1. Ask the daemon for the wallpaper. It answers with a writer id and starts showing our frames.
-using var output = await ExternalOutput.ConnectAsync("Plasma sample");
-Console.WriteLine($"Connected as writer {output.WriterId}. Streaming {width}x{height} @ {fps} fps. Ctrl+C to stop.");
-output.RevokedChanged += () => { Console.WriteLine("Someone picked another wallpaper; stopping."); stop.Cancel(); };
+using var session = await WallpaperSession.ConnectAsync(new SessionOptions { Name = "Plasma sample", Width = width, Height = height });
+Console.WriteLine($"Session {session.Descriptor.Id}. Streaming {width}x{height} @ {fps} fps. Ctrl+C to stop.");
+session.RevokedChanged += () => { Console.WriteLine("Someone picked another wallpaper; stopping."); stop.Cancel(); };
 
 // 2. Render and submit frames at our own pace.
 var frame = new byte[width * height * 4];
@@ -32,7 +32,7 @@ try
     do
     {
         RenderPlasma(frame, width, height, clock.Elapsed.TotalSeconds);
-        output.Submit(frame, width, height); // copies into the shared ring and wakes the host
+        session.Cpu!.Submit(frame); // copies into the session's shared ring and wakes the host
         count++;
     }
     while (await timer.WaitForNextTickAsync(stop.Token));

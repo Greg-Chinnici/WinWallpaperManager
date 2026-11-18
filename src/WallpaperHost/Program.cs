@@ -1,8 +1,10 @@
-// WallpaperHost: attaches one window per monitor behind the desktop icons and shows
-// frames from the shared ring. It knows nothing about images, GIFs or video.
-// Controlled by WallpaperDaemon over \\.\pipe\WinWallpaper.Host.v1 (JSON lines):
-//   {"cmd":"show"} {"cmd":"hide"} {"cmd":"fit","mode":"fill|fit|stretch|center"}
-//   {"cmd":"sampling","mode":"smooth|pixelated"} {"cmd":"status"} {"cmd":"quit"}
+// WallpaperHost: one window per monitor on each of two layers (desktop, overlay), showing frames
+// from producer sessions. It knows nothing about images, GIFs or video.
+// Controlled by WallpaperDaemon over \\.\pipe\WinWallpaper.Host.v2 (JSON lines):
+//   {"cmd":"session.create","layer":"desktop|overlay","transport":"cpu|gpu","width":..,"height":..,"alpha":"opaque|premultiplied","pid":..}
+//   {"cmd":"session.activate","id":..}  {"cmd":"session.destroy","id":..}
+//   {"cmd":"fit","mode":"fill|fit|stretch|center"}  {"cmd":"sampling","mode":"smooth|pixelated"}
+//   {"cmd":"status"}  {"cmd":"quit"}
 
 using System.Collections.Concurrent;
 using System.IO.Pipes;
@@ -12,8 +14,8 @@ using System.Text.Json.Nodes;
 using WallpaperHost;
 using WallpaperProtocol;
 using static WallpaperHost.Attachment;
-using Log = WallpaperHost.Log;
 using static WallpaperHost.Native;
+using Log = WallpaperHost.Log;
 
 using var instance = new Mutex(true, Names.HostMutex, out var isNew);
 if (!isNew) { Log.Write("Another WallpaperHost is already running"); return 1; }
@@ -21,26 +23,25 @@ return new HostApp().Run();
 
 internal sealed class HostApp
 {
-    private const uint WM_APP_ATTACH = WM_APP + 1, WM_APP_FRAME = WM_APP + 2, WM_APP_CMD = WM_APP + 3;
+    private const uint WM_APP_ATTACH = WM_APP + 1, WM_APP_LAYER = WM_APP + 2, WM_APP_CMD = WM_APP + 3;
 
     private readonly uint _taskbarCreated = RegisterWindowMessage("TaskbarCreated");
     private readonly WndProc _controlProc, _wallProc;
     private readonly Renderer _renderer;
-    private readonly List<nint> _windows = new();
+    private readonly List<nint> _desktopWindows = new(), _overlayWindows = new();
+    private readonly bool[] _layerVisible = new bool[2];
     private readonly ConcurrentQueue<(JsonObject Req, TaskCompletionSource<JsonObject> Done)> _cmds = new();
     private nint _control;
     private AttachTarget? _target;
     private int _retryDelayMs = 1000;
     private System.Threading.Timer? _retryTimer;
-    private bool _wantVisible, _hasFrame;
-    private string _fit = "fill";
-    private string _sampling = "smooth";
+    private string _fit = "fill", _sampling = "smooth";
 
     public HostApp()
     {
         _controlProc = ControlProc;
         _wallProc = WallpaperProc;
-        _renderer = new Renderer(() => PostMessage(_control, WM_APP_FRAME, 0, 0));
+        _renderer = new Renderer((layer, visible) => PostMessage(_control, WM_APP_LAYER, (nint)layer, visible ? 1 : 0));
     }
 
     public int Run()
@@ -55,7 +56,7 @@ internal sealed class HostApp
         _ = Task.Run(PipeServerLoop);
         PostMessage(_control, WM_APP_ATTACH, 0, 0);
         while (GetMessage(out var msg, 0, 0, 0) > 0) { TranslateMessage(ref msg); DispatchMessage(ref msg); }
-        Log.Write($"WallpaperHost exiting. presented={_renderer.FramesPresented} rejected={_renderer.FramesRejected} torn={_renderer.FramesTorn}");
+        Log.Write("WallpaperHost exiting");
         return 0;
     }
 
@@ -65,7 +66,7 @@ internal sealed class HostApp
         if (RegisterClassEx(ref wc) == 0) throw new InvalidOperationException("RegisterClassEx failed: " + name);
     }
 
-    // ---------------- desktop attachment ----------------
+    // ---------------- windows ----------------
 
     private sealed record MonitorInfo(string Device, RECT Rect, bool Primary);
 
@@ -84,6 +85,9 @@ internal sealed class HostApp
 
     private bool TryAttach()
     {
+        var monitors = EnumMonitors();
+        SyncOverlayWindows(monitors); // independent of Explorer, so do it first
+
         var progman = FindWindow("Progman", null);
         if (progman == 0) { Log.Write("Progman not found (Explorer not running?)"); return false; }
         var t = Detect();
@@ -96,20 +100,17 @@ internal sealed class HostApp
         if (_target?.Parent != t.Parent) Log.Write($"Topology {t.Topology}: parent={Hex(t.Parent)} below={Hex(t.InsertAfter)}");
         _target = t;
 
-        var monitors = EnumMonitors();
-        for (var i = _windows.Count - 1; i >= 0; i--)
-            if (!IsWindow(_windows[i]) || i >= monitors.Count) { if (IsWindow(_windows[i])) DestroyWindow(_windows[i]); _windows.RemoveAt(i); }
+        for (var i = _desktopWindows.Count - 1; i >= 0; i--)
+            if (!IsWindow(_desktopWindows[i]) || i >= monitors.Count) { if (IsWindow(_desktopWindows[i])) DestroyWindow(_desktopWindows[i]); _desktopWindows.RemoveAt(i); }
 
         var specs = new List<TargetSpec>();
         for (var i = 0; i < monitors.Count; i++)
         {
             var rc = monitors[i].Rect;
-            if (i >= _windows.Count)
-            {
-                _windows.Add(CreateWindowEx(WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            if (i >= _desktopWindows.Count)
+                _desktopWindows.Add(CreateWindowEx(WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                     "WinWallpaperHostWindow", "WinWallpaper", WS_POPUP, 0, 0, rc.W, rc.H, 0, 0, GetModuleHandle(0), 0));
-            }
-            var w = _windows[i];
+            var w = _desktopWindows[i];
             if (GetParent(w) != t.Parent)
             {
                 SetWindowLongPtr(w, GWL_STYLE, (nint)(WS_CHILD | WS_DISABLED | WS_CLIPSIBLINGS)); // child style before SetParent
@@ -120,21 +121,47 @@ internal sealed class HostApp
             SetWindowPos(w, t.InsertAfter, r.Left, r.Top, rc.W, rc.H, SWP_NOACTIVATE);
             specs.Add(new TargetSpec(w, rc.W, rc.H));
         }
-        _renderer.SetTargets(specs);
+        _renderer.SetTargets(Layer.Desktop, specs);
         ApplyVisibility();
 
-        var ok = _windows.All(w => Verify(t, w).ok);
-        Log.Write($"Attached {_windows.Count} monitor window(s): {(ok ? "verified" : "VERIFY FAILED")}");
+        var ok = _desktopWindows.All(w => Verify(t, w).ok);
+        Log.Write($"Attached {_desktopWindows.Count} desktop window(s): {(ok ? "verified" : "VERIFY FAILED")}");
         return ok;
+    }
+
+    /// <summary>
+    /// Overlay windows: top-level, top-most, click-through (WS_EX_LAYERED | WS_EX_TRANSPARENT), never
+    /// activated, not in Alt+Tab. Content is a premultiplied-alpha DirectComposition visual.
+    /// </summary>
+    private void SyncOverlayWindows(List<MonitorInfo> monitors)
+    {
+        while (_overlayWindows.Count > monitors.Count) { DestroyWindow(_overlayWindows[^1]); _overlayWindows.RemoveAt(_overlayWindows.Count - 1); }
+        var specs = new List<TargetSpec>();
+        for (var i = 0; i < monitors.Count; i++)
+        {
+            var rc = monitors[i].Rect;
+            if (i >= _overlayWindows.Count)
+            {
+                var w = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
+                    "WinWallpaperHostWindow", "WinWallpaper overlay", WS_POPUP, rc.Left, rc.Top, rc.W, rc.H, 0, 0, GetModuleHandle(0), 0);
+                SetLayeredWindowAttributes(w, 0, 255, LWA_ALPHA); // layered windows need this to be shown at all
+                _overlayWindows.Add(w);
+            }
+            SetWindowPos(_overlayWindows[i], HWND_TOPMOST, rc.Left, rc.Top, rc.W, rc.H, SWP_NOACTIVATE);
+            specs.Add(new TargetSpec(_overlayWindows[i], rc.W, rc.H));
+        }
+        _renderer.SetTargets(Layer.Overlay, specs);
     }
 
     private void ApplyVisibility()
     {
-        var show = _wantVisible && _hasFrame;
-        foreach (var w in _windows) if (IsWindow(w)) ShowWindow(w, show ? SW_SHOWNA : SW_HIDE);
+        foreach (var w in _desktopWindows) if (IsWindow(w)) ShowWindow(w, _layerVisible[0] ? SW_SHOWNA : SW_HIDE);
+        foreach (var w in _overlayWindows)
+        {
+            if (_layerVisible[1]) SetWindowPos(w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            else ShowWindow(w, SW_HIDE);
+        }
     }
-
-    // ---------------- window procs ----------------
 
     private nint ControlProc(nint hwnd, uint msg, nint w, nint l)
     {
@@ -156,22 +183,22 @@ internal sealed class HostApp
                     _retryDelayMs = Math.Min(_retryDelayMs * 2, 30_000);
                 }
                 return 0;
-            case WM_APP_FRAME:
-                _hasFrame = true;
+            case WM_APP_LAYER:
+                _layerVisible[(int)w] = l != 0;
                 ApplyVisibility();
                 return 0;
             case WM_APP_CMD:
                 while (_cmds.TryDequeue(out var c))
                 {
-                    try { c.Done.SetResult(Execute(c.Req)); }
-                    catch (Exception ex) { c.Done.SetResult(JsonPipe.Error(ex.Message)); }
+                    if ((string?)c.Req["cmd"] == "quit") { c.Done.SetResult(JsonPipe.Ok()); PostMessage(_control, WM_CLOSE, 0, 0); }
+                    else c.Done.SetResult(JsonPipe.Error("unknown cmd"));
                 }
                 return 0;
             case WM_DISPLAYCHANGE:
                 PostMessage(hwnd, WM_APP_ATTACH, 0, 0); // idempotent; unchanged monitors are left alone
                 return 0;
             case WM_SETTINGCHANGE:
-                if (_target is not null && _windows.Any(win => !Verify(_target, win).ok)) PostMessage(hwnd, WM_APP_ATTACH, 0, 0);
+                if (_target is not null && _desktopWindows.Any(win => !Verify(_target, win).ok)) PostMessage(hwnd, WM_APP_ATTACH, 0, 0);
                 return 0;
             case WM_CLOSE:
                 Shutdown();
@@ -195,63 +222,60 @@ internal sealed class HostApp
     private void Shutdown()
     {
         _retryTimer?.Dispose();
-        foreach (var w in _windows) if (IsWindow(w)) ShowWindow(w, SW_HIDE);
-        _renderer.SetTargets(Array.Empty<TargetSpec>());
+        foreach (var w in _desktopWindows.Concat(_overlayWindows)) if (IsWindow(w)) ShowWindow(w, SW_HIDE);
+        _renderer.SetTargets(Layer.Desktop, Array.Empty<TargetSpec>());
+        _renderer.SetTargets(Layer.Overlay, Array.Empty<TargetSpec>());
         _renderer.Dispose();
-        foreach (var w in _windows) if (IsWindow(w)) { SetParent(w, 0); DestroyWindow(w); }
-        RefreshSystemWallpaper();
-    }
-
-    private static void RefreshSystemWallpaper()
-    {
-        var sb = new StringBuilder(260);
+        foreach (var w in _desktopWindows) if (IsWindow(w)) { SetParent(w, 0); DestroyWindow(w); }
+        foreach (var w in _overlayWindows) if (IsWindow(w)) DestroyWindow(w);
+        var sb = new StringBuilder(260); // repaint the system wallpaper without changing the setting
         SystemParametersInfo(SPI_GETDESKWALLPAPER, (uint)sb.Capacity, sb, 0);
-        if (sb.Length > 0) SystemParametersInfo(SPI_SETDESKWALLPAPER, 0, sb.ToString(), 0); // repaint only, no SPIF_UPDATEINIFILE
+        if (sb.Length > 0) SystemParametersInfo(SPI_SETDESKWALLPAPER, 0, sb.ToString(), 0);
     }
 
     // ---------------- daemon control pipe ----------------
 
-    private JsonObject Execute(JsonObject req)
+    private async Task<JsonObject> ExecuteAsync(JsonObject req)
     {
         switch ((string?)req["cmd"])
         {
-            case "show":
-                _wantVisible = true;
-                ApplyVisibility();
+            case "session.create":
+            {
+                var d = await _renderer.CreateSessionAsync(
+                    ProtocolText.ParseLayer((string?)req["layer"]), ProtocolText.ParseTransport((string?)req["transport"]),
+                    req["width"]!.GetValue<int>(), req["height"]!.GetValue<int>(),
+                    ProtocolText.ParseAlpha((string?)req["alpha"]), req["pid"]!.GetValue<int>());
+                return JsonPipe.Ok(new JsonObject { ["session"] = d.ToJson() });
+            }
+            case "session.activate":
+                await _renderer.ActivateAsync(req["id"]!.GetValue<int>());
                 return JsonPipe.Ok();
-            case "hide":
-                _wantVisible = false;
-                _hasFrame = false;
-                _renderer.ResetFirstFrame();
-                _renderer.ClearFrame();
-                ApplyVisibility();
+            case "session.destroy":
+                await _renderer.DestroyAsync(req["id"]!.GetValue<int>());
                 return JsonPipe.Ok();
             case "fit":
-                var mode = ((string?)req["mode"] ?? "fill").ToLowerInvariant();
-                _renderer.SetFit(mode switch { "fit" => FitMode.Fit, "stretch" => FitMode.Stretch, "center" => FitMode.Center, _ => FitMode.Fill });
-                _fit = mode;
+                _fit = ((string?)req["mode"] ?? "fill").ToLowerInvariant();
+                _renderer.SetFit(_fit switch { "fit" => FitMode.Fit, "stretch" => FitMode.Stretch, "center" => FitMode.Center, _ => FitMode.Fill });
                 return JsonPipe.Ok();
             case "sampling":
                 _sampling = (string?)req["mode"] == "pixelated" ? "pixelated" : "smooth";
                 _renderer.SetSampling(_sampling == "pixelated");
                 return JsonPipe.Ok();
             case "status":
-                return JsonPipe.Ok(new JsonObject
-                {
-                    ["visible"] = _wantVisible && _hasFrame,
-                    ["monitors"] = _windows.Count,
-                    ["topology"] = _target?.Topology.ToString() ?? "None",
-                    ["fit"] = _fit,
-                    ["sampling"] = _sampling,
-                    ["framesPresented"] = _renderer.FramesPresented,
-                    ["framesRejected"] = _renderer.FramesRejected,
-                    ["framesTorn"] = _renderer.FramesTorn,
-                });
-            case "quit":
-                PostMessage(_control, WM_CLOSE, 0, 0);
-                return JsonPipe.Ok();
+            {
+                var s = await _renderer.StatusAsync();
+                s["monitors"] = _desktopWindows.Count;
+                s["topology"] = _target?.Topology.ToString() ?? "None";
+                s["fit"] = _fit;
+                s["sampling"] = _sampling;
+                return JsonPipe.Ok(s);
+            }
             default:
-                return JsonPipe.Error("unknown cmd");
+                // Window-thread commands (quit).
+                var tcs = new TaskCompletionSource<JsonObject>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _cmds.Enqueue((req, tcs));
+                PostMessage(_control, WM_APP_CMD, 0, 0);
+                return await tcs.Task;
         }
     }
 
@@ -268,10 +292,10 @@ internal sealed class HostApp
                 using var pipe = new JsonPipe(server);
                 while (await pipe.ReceiveAsync() is { } req)
                 {
-                    var tcs = new TaskCompletionSource<JsonObject>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    _cmds.Enqueue((req, tcs));
-                    PostMessage(_control, WM_APP_CMD, 0, 0); // run on the window thread
-                    await pipe.SendAsync(await tcs.Task);
+                    JsonObject resp;
+                    try { resp = await ExecuteAsync(req); }
+                    catch (Exception ex) { resp = JsonPipe.Error(ex.Message); Log.Write($"{req["cmd"]} failed: {ex.Message}"); }
+                    await pipe.SendAsync(resp);
                 }
                 Log.Write("Daemon disconnected (wallpaper stays as is)");
             }

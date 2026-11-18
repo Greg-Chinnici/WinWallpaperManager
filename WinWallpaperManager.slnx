@@ -2,10 +2,14 @@
   <Folder Name="/samples/">
     <Project Path="samples/ClockRenderer/ClockRenderer.csproj" />
     <Project Path="samples/ExternalRenderer/ExternalRenderer.csproj" />
+    <Project Path="samples/GpuRenderer/GpuRenderer.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/WallpaperDaemon/WallpaperDaemon.csproj" />
     <Project Path="src/WallpaperHost/WallpaperHost.csproj" />
+    <Project Path="src/WallpaperProtocol.D3D11/WallpaperProtocol.D3D11.csproj" />
+    <Project Path="src/WallpaperProtocol.D3D12/WallpaperProtocol.D3D12.csproj" />
+    <Project Path="src/WallpaperProtocol.Vulkan/WallpaperProtocol.Vulkan.csproj" />
     <Project Path="src/WallpaperProtocol/WallpaperProtocol.csproj" />
     <Project Path="src/WallpaperTray/WallpaperTray.csproj" />
   </Folder>

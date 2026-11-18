@@ -4,7 +4,9 @@
 //   dotnet run --project samples/ClockRenderer -- --background "C:\Pictures\mountains.jpg" --seconds
 //
 // Options
-//   --background <file>   jpg/png/bmp/tiff/gif (first frame). Default: a dark gradient
+//   --overlay             float the clock above all windows (transparent, click-through) instead of
+//                         replacing the wallpaper. Defaults to top-right and a smaller size.
+//   --background <file>   jpg/png/bmp/tiff/gif (first frame). Default: a dark gradient (desktop only)
 //   --seconds             show seconds (redraws once a second instead of once a minute)
 //   --12h                 12-hour clock with AM/PM (default: 24-hour)
 //   --no-date             hide the date line
@@ -33,9 +35,13 @@ Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
 if (options.Duration > 0) stop.CancelAfter(TimeSpan.FromSeconds(options.Duration));
 
 using var clock = new ClockFace(options, width, height);
-using var output = await ExternalOutput.ConnectAsync("Digital clock");
-output.RevokedChanged += () => { Console.WriteLine("Another wallpaper was chosen; stopping."); stop.Cancel(); };
-Console.WriteLine($"Clock running at {width}x{height} (seconds: {(options.Seconds ? "on" : "off")}). Ctrl+C to stop.");
+using var session = await WallpaperSession.ConnectAsync(new SessionOptions
+{
+    Name = "Digital clock", Width = width, Height = height,
+    Layer = options.Overlay ? Layer.Overlay : Layer.Desktop, // overlay => premultiplied alpha
+});
+session.RevokedChanged += () => { Console.WriteLine("Another wallpaper or overlay took this layer; stopping."); stop.Cancel(); };
+Console.WriteLine($"Clock running at {width}x{height} on the {(options.Overlay ? "overlay" : "desktop")} layer (seconds: {(options.Seconds ? "on" : "off")}). Ctrl+C to stop.");
 
 var frames = 0;
 try
@@ -43,7 +49,7 @@ try
     while (!stop.IsCancellationRequested)
     {
         var now = DateTime.Now;
-        output.Submit(clock.Render(now), width, height);
+        session.Cpu!.Submit(clock.Render(now));
         frames++;
         // Sleep until the displayed text next changes: the next second, or the next minute.
         var next = options.Seconds
@@ -72,13 +78,14 @@ internal sealed class ClockFace : IDisposable
         _o = o; _w = w; _h = h;
         _frame = new byte[w * h * 4];
         _pin = GCHandle.Alloc(_frame, GCHandleType.Pinned);
-        _canvas = new Bitmap(w, h, w * 4, PixelFormat.Format32bppArgb, _pin.AddrOfPinnedObject());
+        _canvas = new Bitmap(w, h, w * 4, PixelFormat.Format32bppPArgb, _pin.AddrOfPinnedObject()); // premultiplied BGRA
         _color = ColorTranslator.FromHtml(o.Color);
         var family = FontFamily.Families.Any(f => f.Name == o.Font) ? o.Font : "Segoe UI";
-        var timeSize = h * (o.Seconds ? 0.15f : 0.19f);
+        var scale = o.Overlay ? 0.45f : 1f;
+        var timeSize = h * (o.Seconds ? 0.15f : 0.19f) * scale;
         _timeFont = new Font(family, timeSize, FontStyle.Regular, GraphicsUnit.Pixel);
         _suffixFont = new Font(family, timeSize * 0.32f, FontStyle.Regular, GraphicsUnit.Pixel);
-        _dateFont = new Font(family, h * 0.034f, FontStyle.Regular, GraphicsUnit.Pixel);
+        _dateFont = new Font(family, h * 0.034f * scale, FontStyle.Regular, GraphicsUnit.Pixel);
         _background = RenderBackground();
     }
 
@@ -86,6 +93,7 @@ internal sealed class ClockFace : IDisposable
     {
         using (var g = Graphics.FromImage(_canvas))
         {
+            if (_o.Overlay) { g.Clear(Color.Transparent); return (byte[])_frame.Clone(); } // nothing behind the clock
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             if (_o.Background is { } path)
@@ -132,7 +140,21 @@ internal sealed class ClockFace : IDisposable
         var blockW = Math.Max(timeSize.Width + suffixSize.Width, dateSize.Width);
         var blockH = timeSize.Height + gap + dateSize.Height;
 
-        var margin = _h * 0.06f;
+        var margin = _h * (_o.Overlay ? 0.03f : 0.06f);
+        if (_o.Overlay)
+        {
+            // A soft translucent pill keeps the clock readable over any window.
+            var pad = _h * 0.012f;
+            var (px, py) = _o.Position switch
+            {
+                "top-left" => (margin, margin), "bottom-left" => (margin, _h - margin - blockH),
+                "bottom-right" => (_w - margin - blockW, _h - margin - blockH), "center" => ((_w - blockW) / 2, (_h - blockH) / 2),
+                _ => (_w - margin - blockW, margin),
+            };
+            using var pill = RoundedRect(px - pad * 2, py - pad, blockW + pad * 4, blockH + pad * 2, pad * 2);
+            using var veil = new SolidBrush(Color.FromArgb(110, 10, 12, 18));
+            g.FillPath(veil, pill);
+        }
         var (x, y, align) = _o.Position switch
         {
             "top-left" => (margin, margin, StringAlignment.Near),
@@ -161,6 +183,17 @@ internal sealed class ClockFace : IDisposable
         return _frame;
     }
 
+    private static GraphicsPath RoundedRect(float x, float y, float w, float h, float r)
+    {
+        var p = new GraphicsPath();
+        p.AddArc(x, y, r * 2, r * 2, 180, 90);
+        p.AddArc(x + w - r * 2, y, r * 2, r * 2, 270, 90);
+        p.AddArc(x + w - r * 2, y + h - r * 2, r * 2, r * 2, 0, 90);
+        p.AddArc(x, y + h - r * 2, r * 2, r * 2, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+
     private void DrawText(Graphics g, string s, Font f, float x, float y, StringFormat fmt)
     {
         // Soft shadow: a few faint offset copies, then the text itself.
@@ -179,7 +212,7 @@ internal sealed class ClockFace : IDisposable
     }
 }
 
-internal sealed record Options(string? Background, bool Seconds, bool TwelveHour, bool ShowDate, string Position,
+internal sealed record Options(bool Overlay, string? Background, bool Seconds, bool TwelveHour, bool ShowDate, string Position,
     int Dim, string Color, string Font, int Width, int Height, int Duration)
 {
     public static Options Parse(string[] args)
@@ -188,8 +221,9 @@ internal sealed record Options(string? Background, bool Seconds, bool TwelveHour
         int Int(string name, int d) => int.TryParse(Val(name), out var n) ? n : d;
         var bg = Val("--background");
         if (bg is not null && !File.Exists(bg)) throw new FileNotFoundException("Background image not found", bg);
-        return new Options(bg, args.Contains("--seconds"), args.Contains("--12h"), !args.Contains("--no-date"),
-            (Val("--position") ?? "center").ToLowerInvariant(), Math.Clamp(Int("--dim", 25), 0, 100),
+        var overlay = args.Contains("--overlay");
+        return new Options(overlay, overlay ? null : bg, args.Contains("--seconds"), args.Contains("--12h"), !args.Contains("--no-date"),
+            (Val("--position") ?? (overlay ? "top-right" : "center")).ToLowerInvariant(), Math.Clamp(Int("--dim", 25), 0, 100),
             Val("--color") ?? "#FFFFFF", Val("--font") ?? "Segoe UI Variable Display",
             Int("--width", 0), Int("--height", 0), Int("--duration", 0));
     }
@@ -200,8 +234,8 @@ internal sealed record Options(string? Background, bool Seconds, bool TwelveHour
     /// <summary>Primary monitor in physical pixels, unless overridden. The host scales it to other monitors.</summary>
     public (int, int) FrameSize()
     {
-        if (Width > 0 && Height > 0) return (Math.Min(Width, FrameChannel.MaxWidth), Math.Min(Height, FrameChannel.MaxHeight));
+        if (Width > 0 && Height > 0) return (Math.Min(Width, SessionMap.MaxWidth), Math.Min(Height, SessionMap.MaxHeight));
         SetProcessDpiAwarenessContext(-4); // per-monitor v2, so metrics aren't DPI-virtualised
-        return (Math.Min(GetSystemMetrics(0), FrameChannel.MaxWidth), Math.Min(GetSystemMetrics(1), FrameChannel.MaxHeight));
+        return (Math.Min(GetSystemMetrics(0), SessionMap.MaxWidth), Math.Min(GetSystemMetrics(1), SessionMap.MaxHeight));
     }
 }

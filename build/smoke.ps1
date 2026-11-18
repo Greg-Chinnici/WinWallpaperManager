@@ -14,7 +14,7 @@ $media = Join-Path $root "artifacts/smoke-media"
 $failures = 0
 
 function Request([hashtable]$msg) {
-    $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", "WinWallpaper.Daemon.v1", [System.IO.Pipes.PipeDirection]::InOut)
+    $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", "WinWallpaper.Daemon.v2", [System.IO.Pipes.PipeDirection]::InOut)
     $pipe.Connect(10000)
     try {
         $w = New-Object System.IO.StreamWriter($pipe); $w.AutoFlush = $true; $w.NewLine = "`n"
@@ -48,7 +48,7 @@ Write-Host "==> starting $AppDir\WallpaperDaemon.exe"
 Start-Process (Join-Path $AppDir "WallpaperDaemon.exe")
 try {
     $s = Request @{ cmd = "status" }
-    Check "daemon answers" ($s.ok -and $s.protocol -eq 1) "(state=$($s.state))"
+    Check "daemon answers" ($s.ok -and $s.protocol -eq 2) "(state=$($s.state))"
     Check "daemon started host" ([bool](Get-Process WallpaperHost -ErrorAction SilentlyContinue))
 
     $r = Request @{ cmd = "set"; path = $png }
@@ -75,7 +75,24 @@ try {
         Start-Sleep 1
         $r = Request @{ cmd = "status" }
         Check "previous wallpaper restored after disconnect" ($r.state -in "playing", "paused") "(state=$($r.state))"
+
+        $py = Start-Process python -ArgumentList "`"$root/samples/python/color_cycle.py`" 4 --overlay" -PassThru -NoNewWindow
+        Start-Sleep 2
+        $r = Request @{ cmd = "status" }
+        Check "overlay layer is independent" ($r.overlay.name -eq "Python colour cycle" -and $r.state -in "playing", "paused") "(overlay=$($r.overlay.name) desktop=$($r.state))"
+        $r = Request @{ cmd = "overlay.stop" }
+        Check "overlay.stop" ($r.ok -and -not $r.overlay)
+        $py.WaitForExit(15000) | Out-Null
     } else { Write-Host "SKIP  external renderer (python not found)" -ForegroundColor Yellow }
+
+    # GPU sessions: host-created shared textures + fences imported by each API. Skipped where the
+    # machine can't do it (CI runners have no GPU / Vulkan driver), failed if it starts but breaks.
+    $gpu = Join-Path $root "samples/GpuRenderer"
+    foreach ($api in "d3d11", "d3d12", "vulkan") {
+        $out = dotnet run --project $gpu -c Release --no-build -- --api $api --layer overlay --seconds 3 2>&1 | Out-String
+        if ($out -match "Rendered (\d+) frames") { Check "gpu $api" ([int]$Matches[1] -gt 30) "($($Matches[1]) frames in 3s)" }
+        else { Write-Host "SKIP  gpu $api ($(($out -split "`n" | Where-Object { $_ -match 'Exception|failed' } | Select-Object -First 1).Trim()))" -ForegroundColor Yellow }
+    }
 
     $r = Request @{ cmd = "stop" }
     Check "stop" ($r.ok -and $r.state -eq "stopped")

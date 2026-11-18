@@ -4,32 +4,39 @@ using WallpaperProtocol;
 
 namespace WallpaperDaemon.Sources;
 
-/// <summary>Where sources put frames: the shared ring, as the daemon's writer.</summary>
+/// <summary>Size limit for the daemon's own decoded media (larger images are downscaled).</summary>
+internal static class Limits { public const int MaxWidth = 3840, MaxHeight = 2160; }
+
+/// <summary>
+/// Where sources put frames: the daemon's CPU session on the desktop layer. The session can be
+/// swapped underneath (e.g. after a host restart) without the source noticing.
+/// </summary>
 internal sealed unsafe class FrameSink
 {
-    public const int DaemonWriter = 1;
-    private readonly FrameChannel _channel;
     private readonly object _gate = new();
+    private SessionMap? _map;
     public long Published;
 
-    public FrameSink(FrameChannel channel) => _channel = channel;
+    public void Attach(SessionMap? map) { lock (_gate) { _map = map; } }
 
-    /// <summary>Copy rows (any stride, may be negative for bottom-up) into the ring and publish.</summary>
+    /// <summary>Copy rows (any stride, may be negative for bottom-up) into the session and publish.</summary>
     public void Publish(byte* src, int width, int height, int srcStride)
     {
         lock (_gate)
         {
-            var dst = _channel.BeginFrame(width, height);
+            if (_map is not { } map) return;
+            if (width != map.Width || height != map.Height) throw new InvalidOperationException($"Frame {width}x{height} doesn't match session {map.Width}x{map.Height}");
+            var dst = map.NextSlotPointer;
             var row = width * 4;
-            if (srcStride == row) Buffer.MemoryCopy(src, dst, (long)row * height, (long)row * height);
-            else for (var y = 0; y < height; y++) Buffer.MemoryCopy(src + (long)y * srcStride, dst + (long)y * row, row, row);
-            _channel.Publish(DaemonWriter, width, height);
+            if (srcStride == row && map.Stride == row) Buffer.MemoryCopy(src, dst, (long)row * height, (long)row * height);
+            else for (var y = 0; y < height; y++) Buffer.MemoryCopy(src + (long)y * srcStride, dst + (long)y * map.Stride, row, row);
+            map.Publish();
             Published++;
         }
     }
 
-    /// <summary>Re-signal the host without writing (the last frame is still in the ring).</summary>
-    public void Poke() => _channel.FrameReady.Set();
+    /// <summary>Re-signal the host without writing (the last frame is still in the session).</summary>
+    public void Poke() { lock (_gate) { _map?.Ready.Set(); } }
 
     public void Publish(ReadOnlySpan<byte> bgra, int width, int height)
     {
@@ -52,6 +59,9 @@ internal abstract class Source : IDisposable
 
     protected Source(string path) => Path = path;
 
+    /// <summary>Decode/open enough to know <see cref="Width"/> and <see cref="Height"/> (throws on bad files).</summary>
+    public abstract void Prepare();
+    /// <summary>Start publishing into <paramref name="sink"/> (sized Width x Height).</summary>
     public abstract void Start(FrameSink sink);
     public virtual void SetFps(double fps) => Fps = fps;
     public virtual void Pause() { }

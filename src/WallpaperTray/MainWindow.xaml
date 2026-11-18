@@ -62,6 +62,25 @@
                 </StackPanel>
             </Border>
 
+            <!-- Overlay layer (only while an app floats something above all windows) -->
+            <Border x:Name="OverlayCard" Style="{StaticResource Card}" Margin="0,12,0,0" Padding="16,12" Visibility="Collapsed">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="&#xE81E;" Style="{StaticResource Glyph}" FontSize="18" Margin="0,0,12,0" />
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock x:Name="OverlayTitle" Text="Overlay" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                        <TextBlock x:Name="OverlayDetail" Text="Floating above all windows" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                    <Button Grid.Column="2" Click="OnStopOverlayClick" ToolTip="Remove the overlay" Width="40" Height="34" Padding="0">
+                        <TextBlock Text="&#xE711;" Style="{StaticResource Glyph}" />
+                    </Button>
+                </Grid>
+            </Border>
+
             <!-- Choose -->
             <TextBlock Text="Choose a wallpaper" Style="{StaticResource SectionLabel}" Margin="2,20,0,8" />
             <UniformGrid Columns="3">
@@ -162,7 +181,7 @@
                                    Text="Stream frames from your own app, game or shader straight onto the desktop through the daemon." />
                         <Grid Margin="0,0,0,8">
                             <TextBox x:Name="PipeName" IsReadOnly="True" FontFamily="Cascadia Mono, Consolas" FontSize="12"
-                                     Text="\\.\pipe\WinWallpaper.Daemon.v1" Margin="0,0,44,0" />
+                                     Margin="0,0,44,0" /> <!-- text set in code from Names.DaemonPipe -->
                             <Button HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="38" Padding="0" Click="OnCopyPipe" ToolTip="Copy pipe name">
                                 <TextBlock Text="&#xE8C8;" Style="{StaticResource Glyph}" FontSize="14" />
                             </Button>

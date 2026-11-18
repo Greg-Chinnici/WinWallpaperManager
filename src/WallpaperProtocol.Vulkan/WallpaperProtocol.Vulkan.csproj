@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><Description>WinWallpaper GPU transport helper for Vulkan producers.</Description></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Vortice.Vulkan" Version="3.3.0" />
+    <ProjectReference Include="../WallpaperProtocol/WallpaperProtocol.csproj" />
+  </ItemGroup>
+</Project>
